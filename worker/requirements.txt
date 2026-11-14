@@ -1,0 +1,7 @@
+fastapi>=0.110
+uvicorn>=0.29
+faster-whisper>=1.0
+requests>=2.31
+# Note: faster-whisper pulls in PyAV, but the worker decodes audio with
+# ffmpeg (see decode_audio_ffmpeg in worker.py) because faster-whisper 1.x
+# passes metadata_errors= to av.open(), which PyAV removed in 15.0.

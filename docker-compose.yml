@@ -1,0 +1,30 @@
+services:
+  manager:
+    build: ./manager
+    ports:
+      - "9400:9400"
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - ./server/.env
+    environment:
+      PORT: "9400"
+      DATA_DIR: /app/data
+    restart: unless-stopped
+
+  worker:
+    build: ./worker
+    ports:
+      - "9500:9500"
+    environment:
+      MANAGER_URL: http://manager:9400
+      WORKER_PORT: "9500"
+      WHISPER_MODEL: small
+    volumes:
+      - whisper-models:/models
+    depends_on:
+      - manager
+    restart: unless-stopped
+
+volumes:
+  whisper-models:

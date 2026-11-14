@@ -1,0 +1,14 @@
+data/
+server/.env
+manager/.env
+manager/node_modules/
+worker/.venv/
+worker/__pycache__/
+worker/tests/__pycache__/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+probe/hf-cache/
+probe/*.log
+probe/test-video.mp4
