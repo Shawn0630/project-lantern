@@ -32,6 +32,10 @@ transcription (transcribe → merge → translate → subtitle synthesis).
   its capabilities on every heartbeat (`transcribe`, `translate`, and
   `burnin` when ffmpeg is on PATH) plus host load stats; the heartbeat
   runs on its own thread so a long task never makes the worker look dead.
+  Load stats come from `psutil` when installed (a real dependency);
+  on Linux the worker falls back to `/proc/meminfo` + load average, but
+  on Windows `psutil` is the only source — without it the manager's
+  Resources column stays blank.
 
 ### Scheduler (v1.2 — same worker-pull model, no new services)
 
@@ -143,7 +147,9 @@ docker run -d --name lantask-worker -p 9500:9500 \
 
 Or natively: `MANAGER_URL=http://<MANAGER_LAN_IP>:9400 WORKER_PORT=9500 python worker.py`.
 The worker registers itself via heartbeat; it also appears in the
-Workers page. To give it a name up front, use the Workers page
+Workers page, which shows each worker's status, current task
+(job + task type + segment), capabilities, and Resources
+(CPU%, memory, load). To give it a name up front, use the Workers page
 (Add worker) or set `WORKER_NAME`.
 
 ## Job options (per job)

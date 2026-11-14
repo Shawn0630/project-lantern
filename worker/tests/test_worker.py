@@ -153,6 +153,16 @@ def test_collect_stats_shape():
     assert stats["cpuPercent"] is None or isinstance(stats["cpuPercent"], float)
 
 
+def test_collect_stats_reports_memory_when_psutil_available():
+    # psutil is a real dependency (requirements.txt): it is the only stats
+    # source on Windows, where /proc/meminfo does not exist.
+    pytest.importorskip("psutil")
+    stats = worker_mod.collect_stats()
+    assert stats["memTotalMb"] is not None and stats["memTotalMb"] > 0
+    assert stats["memUsedMb"] is not None and 0 <= stats["memUsedMb"] <= stats["memTotalMb"]
+    assert stats["cpuPercent"] is None or isinstance(stats["cpuPercent"], float)
+
+
 def test_capabilities_include_burnin_when_ffmpeg_present():
     caps = worker_mod.capabilities()
     assert "transcribe" in caps and "translate" in caps

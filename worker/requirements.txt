@@ -2,6 +2,11 @@ fastapi>=0.110
 uvicorn>=0.29
 faster-whisper>=1.0
 requests>=2.31
+psutil>=5.9
+# psutil reports CPU% and memory in the heartbeat stats (see
+# collect_stats in worker.py). On Linux the worker falls back to
+# /proc/meminfo + load average, but on Windows psutil is the only source —
+# without it the manager's Resources column stays blank.
 # Note: faster-whisper pulls in PyAV, but the worker decodes audio with
 # ffmpeg (see decode_audio_ffmpeg in worker.py) because faster-whisper 1.x
 # passes metadata_errors= to av.open(), which PyAV removed in 15.0.

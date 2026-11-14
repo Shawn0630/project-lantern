@@ -16,3 +16,4 @@ probe/*.pid
 probe/*.id
 probe/data-v11/
 probe/data-v12/
+probe/data-ct/

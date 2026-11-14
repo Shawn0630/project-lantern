@@ -18,6 +18,30 @@ export function createRouter(store, runner) {
 
   const findTask = (taskId) => runner.findTask(taskId);
 
+  // The task a worker is currently running, if any: tasks carry the
+  // worker's id once assigned, so the Workers page can show what each
+  // worker is doing without a second fetch. Matches on either the
+  // worker-reported id or the manager-generated registry id.
+  const currentTaskForWorker = (worker) => {
+    const ids = [worker.workerId, worker.id].filter(Boolean);
+    for (const job of store.listJobs()) {
+      for (const task of job.tasks || []) {
+        if (task.state === 'assigned' && ids.includes(task.workerId)) {
+          return {
+            jobId: job.id,
+            jobName: job.name,
+            taskId: task.id,
+            type: task.type,
+            chunkIndex: task.chunkIndex ?? null,
+            groupIndex: task.groupIndex ?? null,
+            segmentIndex: task.segmentIndex ?? null,
+          };
+        }
+      }
+    }
+    return null;
+  };
+
   router.get('/health', (req, res) => res.json({ ok: true, version: '1.2.0' }));
 
   // ---- jobs ----
@@ -87,7 +111,10 @@ export function createRouter(store, runner) {
   });
 
   // ---- workers ----
-  router.get('/workers', (req, res) => res.json(store.listWorkers()));
+  router.get('/workers', (req, res) => res.json(store.listWorkers().map((w) => ({
+    ...w,
+    currentTask: currentTaskForWorker(w),
+  }))));
 
   router.post('/workers', (req, res) => {
     const { host, port, name } = req.body || {};

@@ -73,6 +73,13 @@ function fmtStats(stats) {
   return parts.length ? parts.join(' · ') : '—';
 }
 
+function fmtCurrentTask(ct) {
+  if (!ct) return '—';
+  const n = ct.chunkIndex ?? ct.groupIndex ?? ct.segmentIndex;
+  const label = `${ct.type}${n == null ? '' : ' #' + n}`;
+  return `<a href="#/jobs/${esc(ct.jobId)}">${esc(ct.jobName)} — ${esc(label)}</a>`;
+}
+
 async function loadWorkers() {
   const workers = await api('/api/workers');
   const tbody = $('#workers-table tbody');
@@ -82,11 +89,12 @@ async function loadWorkers() {
     <td>${esc(w.status)}</td>
     <td>${fmtAgo(w.lastSeen)}</td>
     <td>${w.load == null ? '—' : esc(w.load)}</td>
+    <td>${fmtCurrentTask(w.currentTask)}</td>
     <td>${esc(w.model || '—')}</td>
     <td>${Array.isArray(w.capabilities) ? esc(w.capabilities.join(', ')) : '—'}</td>
     <td>${esc(fmtStats(w.stats))}</td>
     <td><button data-del-worker="${esc(w.id)}">Delete</button></td>
-  </tr>`).join('') || '<tr><td colspan="9">No workers yet</td></tr>';
+  </tr>`).join('') || '<tr><td colspan="10">No workers yet</td></tr>';
 }
 
 async function loadJobDetail(id) {
