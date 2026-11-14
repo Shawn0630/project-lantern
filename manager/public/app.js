@@ -62,6 +62,17 @@ async function loadJobs() {
   }).join('') || '<tr><td colspan="6">No jobs yet</td></tr>';
 }
 
+function fmtStats(stats) {
+  if (!stats) return '—';
+  const parts = [];
+  if (stats.cpuPercent != null) parts.push(`CPU ${stats.cpuPercent}%`);
+  if (stats.memUsedMb != null && stats.memTotalMb != null) {
+    parts.push(`MEM ${(stats.memUsedMb / 1024).toFixed(1)}/${(stats.memTotalMb / 1024).toFixed(1)} GB`);
+  }
+  if (stats.loadAvg1 != null) parts.push(`load ${stats.loadAvg1}`);
+  return parts.length ? parts.join(' · ') : '—';
+}
+
 async function loadWorkers() {
   const workers = await api('/api/workers');
   const tbody = $('#workers-table tbody');
@@ -72,8 +83,10 @@ async function loadWorkers() {
     <td>${fmtAgo(w.lastSeen)}</td>
     <td>${w.load == null ? '—' : esc(w.load)}</td>
     <td>${esc(w.model || '—')}</td>
+    <td>${Array.isArray(w.capabilities) ? esc(w.capabilities.join(', ')) : '—'}</td>
+    <td>${esc(fmtStats(w.stats))}</td>
     <td><button data-del-worker="${esc(w.id)}">Delete</button></td>
-  </tr>`).join('') || '<tr><td colspan="7">No workers yet</td></tr>';
+  </tr>`).join('') || '<tr><td colspan="9">No workers yet</td></tr>';
 }
 
 async function loadJobDetail(id) {
@@ -102,9 +115,9 @@ async function loadJobDetail(id) {
   </tr>`).join('') || '<tr><td colspan="3">—</td></tr>';
   $('#tasks-table tbody').innerHTML = job.tasks.map((t) => `<tr>
     <td>${esc(t.id)}</td><td>${esc(t.type)} ${t.chunkIndex ?? t.groupIndex ?? ''}</td>
-    <td>${esc(t.state)}</td><td>${t.attempts}</td><td>${esc(t.workerId || '—')}</td>
+    <td>${esc(t.state)}${t.state === 'assigned' ? (t.ack ? ' (acked)' : ' (unacked)') : ''}</td><td>${t.attempts}</td><td>${t.weight ?? 0}</td><td>${esc(t.workerId || '—')}</td>
     <td>${esc(t.error || '')}</td>
-  </tr>`).join('') || '<tr><td colspan="6">—</td></tr>';
+  </tr>`).join('') || '<tr><td colspan="7">—</td></tr>';
   const dl = [];
   if (job.outputs.sourceSrt) dl.push(['source.srt', 'source.srt']);
   if (job.outputs.translatedSrt) dl.push(['translated.srt', 'translated.srt']);

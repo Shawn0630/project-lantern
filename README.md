@@ -28,7 +28,44 @@ transcription (transcribe → merge → translate → subtitle synthesis).
 - **Worker** (`worker/`, Python 3.12, FastAPI + faster-whisper). Polls
   the manager, downloads chunk audio, transcribes locally with word
   timestamps, translates via Gemini REST, uploads JSON results.
-  Serves a small `/health` API on its own port.
+  Serves a small `/health` API on its own port. Each worker advertises
+  its capabilities on every heartbeat (`transcribe`, `translate`, and
+  `burnin` when ffmpeg is on PATH) plus host load stats; the heartbeat
+  runs on its own thread so a long task never makes the worker look dead.
+
+### Scheduler (v1.2 — same worker-pull model, no new services)
+
+- **Capabilities.** Every task type declares its required capability
+  (`transcribe` / `translate` / `burnin`); `GET /api/tasks/next` only
+  offers tasks the requesting worker can do. Workers that never report
+  capabilities are assumed able to do everything (back-compat).
+- **Weights.** Each task carries a base `weight` (0 for now). The `next`
+  query orders by effective weight DESC, then `queuedAt` ASC. A job that
+  already started (any task done or assigned) gives its remaining tasks
+  +1, so a started job finishes instead of interleaving with a new one.
+- **Acked assignment.** Claiming reserves a task but counts no attempt.
+  The worker acks receipt immediately (`POST /api/tasks/:id/ack`); the
+  ack counts the attempt. An assignment never acked within 45 s
+  (`ACK_TIMEOUT_MS`) is re-offered by a 10 s sweep, without consuming a
+  try. Assignments silent for 15 minutes are re-queued by a sweeper
+  (backstop).
+- **Boot reconciliation.** On startup the manager immediately sweeps
+  stale assignments, and 30 s later re-checks every assigned task
+  against worker heartbeats: tasks of workers silent for 45 s+
+  (`WORKER_SILENT_MS`) are re-queued and those workers marked offline.
+  No task is lost across a manager restart.
+- **Per-stage retry budgets.** The scheduler only records failures; the
+  pipeline decides by task type: transcribe 2 attempts, translate 3,
+  burn-in 1. A failed task prefers another worker (exclusion expires
+  after 60 s so a single-worker setup can still retry).
+- **Concurrency cap.** At most 16 simultaneous in-flight (assigned)
+  tasks by default (`MAX_IN_FLIGHT_TASKS` env); `next` returns nothing
+  above the cap.
+
+Task states: `queued → assigned → done/failed` (assigned splits into
+un-acked / acked). Manager and worker must be updated together: v1.2
+workers ack claims, and a v1.2 manager re-offers tasks a v1.1 worker
+never acks.
 
 ### Job pipeline (one video)
 
@@ -68,10 +105,8 @@ transcription (transcribe → merge → translate → subtitle synthesis).
    track (stream copy). `source.srt` and `translated.srt` are always
    emitted (plus `bilingual.srt` when enabled).
 
-Task states: `queued → assigned → done/failed`. A failed task retries
-once, preferring a different worker (the preference expires after 60 s so
-a single-worker setup can still retry). Assignments silent for 15 minutes
-are re-queued by a sweeper.
+Task states: `queued → assigned → done/failed`. See "Scheduler (v1.2)"
+above for weights, ack, retry budgets, and the concurrency cap.
 
 ## Run
 
@@ -81,6 +116,9 @@ docker compose up -d --build
 # Manager UI: http://localhost:9400
 # Worker health: http://localhost:9500/health
 ```
+
+Manager knobs (environment): `MAX_IN_FLIGHT_TASKS` (default 16),
+`ACK_TIMEOUT_MS` (default 45000).
 
 Without Docker, run natively:
 
@@ -138,7 +176,7 @@ Workers page. To give it a name up front, use the Workers page
 ## Tests
 
 ```bash
-cd manager && npm test        # node --test (chunk plan, merger, SRT, translate, resegment, multipart, LLM)
+cd manager && npm test        # node --test (chunk plan, merger, SRT, translate, resegment, multipart, LLM, scheduler)
 cd worker && .venv/bin/python -m pytest tests/ -q
 ```
 

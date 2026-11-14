@@ -16,15 +16,9 @@ const DOWNLOADABLE = {
 export function createRouter(store, runner) {
   const router = express.Router();
 
-  const findTask = (taskId) => {
-    for (const job of store.listJobs()) {
-      const task = job.tasks.find((t) => t.id === taskId);
-      if (task) return { job, task };
-    }
-    return null;
-  };
+  const findTask = (taskId) => runner.findTask(taskId);
 
-  router.get('/health', (req, res) => res.json({ ok: true, version: '1.0.0' }));
+  router.get('/health', (req, res) => res.json({ ok: true, version: '1.2.0' }));
 
   // ---- jobs ----
   router.get('/jobs', (req, res) => {
@@ -126,7 +120,7 @@ export function createRouter(store, runner) {
   });
 
   router.post('/workers/heartbeat', (req, res) => {
-    const { id, host, port, name, load, model, version } = req.body || {};
+    const { id, host, port, name, load, model, version, capabilities, ffmpeg, stats } = req.body || {};
     if (!host || !port) return res.status(400).json({ error: 'host and port are required' });
     const workers = store.listWorkers();
     let worker = (id && workers.find((w) => w.id === id)) ||
@@ -134,6 +128,7 @@ export function createRouter(store, runner) {
     if (!worker) {
       worker = {
         id: newId('worker'),
+        workerId: id || null,
         name: name || `${host}:${port}`,
         host,
         port: Number(port),
@@ -143,16 +138,23 @@ export function createRouter(store, runner) {
         load: load ?? null,
         model: model || null,
         version: version || null,
+        capabilities: Array.isArray(capabilities) ? capabilities : null,
+        ffmpeg: ffmpeg ?? null,
+        stats: stats ?? null,
         createdAt: new Date().toISOString(),
       };
       workers.push(worker);
     } else {
       worker.status = 'online';
       worker.lastSeen = new Date().toISOString();
+      if (id && !worker.workerId) worker.workerId = id;
       if (load !== undefined) worker.load = load;
       if (model) worker.model = model;
       if (version) worker.version = version;
       if (name) worker.name = name;
+      if (Array.isArray(capabilities)) worker.capabilities = capabilities;
+      if (ffmpeg !== undefined) worker.ffmpeg = ffmpeg;
+      if (stats !== undefined) worker.stats = stats;
     }
     store.saveWorkers(workers);
     res.json({ id: worker.id, registered: worker.registered });
@@ -181,6 +183,22 @@ export function createRouter(store, runner) {
       inputUrl: `/api/tasks/${task.id}/input`,
       inputKind: input.kind,
     });
+  });
+
+  // The claiming worker confirms receipt right after claiming. A task
+  // that is never acked is re-offered by the un-acked sweep; the ack
+  // counts the attempt (see Runner.ackTask).
+  router.post('/tasks/:id/ack', (req, res) => {
+    const found = findTask(req.params.id);
+    if (!found) return res.status(404).json({ error: 'task not found' });
+    const { workerId } = req.body || {};
+    if (!workerId) return res.status(400).json({ error: 'workerId is required' });
+    try {
+      runner.ackTask(found.job, found.task, workerId);
+    } catch (err) {
+      return res.status(err.status || 400).json({ error: String(err?.message || err) });
+    }
+    res.json({ ok: true });
   });
 
   router.get('/tasks/:id/input', (req, res) => {

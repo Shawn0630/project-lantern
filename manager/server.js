@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { Store } from './src/store.js';
-import { Runner } from './src/pipeline.js';
+import { Runner, UNACKED_SWEEP_MS } from './src/pipeline.js';
 import { createRouter } from './src/routes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -36,6 +36,15 @@ const DATA_DIR = process.env.DATA_DIR || path.join(repoRoot, 'data');
 const store = new Store(DATA_DIR);
 const runner = new Runner(store);
 
+// Boot-time reconciliation: re-queue assignments orphaned by a manager
+// restart right away instead of waiting for the periodic sweep.
+runner.reconcileOnBoot();
+// Live workers re-heartbeat within ~15 s of the manager coming back; the
+// liveness pass runs after that grace period.
+const bootVerifyTimer = setTimeout(() => {
+  try { runner.verifyAssignedWorkers(); } catch (e) { console.error('boot verify error', e); }
+}, 30000);
+
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.use('/api', createRouter(store, runner));
@@ -49,13 +58,18 @@ const server = app.listen(PORT, () => {
 
 const tickTimer = setInterval(() => runner.tick().catch((e) => console.error('tick error', e)), 2000);
 const sweepTimer = setInterval(() => {
-  try { runner.sweepStale(); } catch (e) { console.error('sweep error', e); }
+  try { runner.sweepStale(); runner.verifyAssignedWorkers(); } catch (e) { console.error('sweep error', e); }
 }, 30000);
+const unackedTimer = setInterval(() => {
+  try { runner.sweepUnacked(); } catch (e) { console.error('unacked sweep error', e); }
+}, UNACKED_SWEEP_MS);
 runner.tick().catch(() => {});
 
 function shutdown() {
   clearInterval(tickTimer);
   clearInterval(sweepTimer);
+  clearInterval(unackedTimer);
+  clearTimeout(bootVerifyTimer);
   server.close(() => process.exit(0));
 }
 process.on('SIGINT', shutdown);

@@ -138,3 +138,78 @@ def test_translate_lines_count_mismatch_retries_then_raises():
 def test_translate_lines_requires_key():
     with pytest.raises(RuntimeError, match="no LLM API key"):
         translate_lines(["a"], "en", "zh-CN", "", "m", session=FakeSession([]))
+
+
+# ---- scheduler v1.2: capabilities, stats, claim ack ----
+import shutil  # noqa: E402
+
+import worker as worker_mod  # noqa: E402
+
+
+def test_collect_stats_shape():
+    stats = worker_mod.collect_stats()
+    assert set(stats) == {"loadAvg1", "cpuPercent", "memUsedMb", "memTotalMb"}
+    assert stats["loadAvg1"] is None or isinstance(stats["loadAvg1"], float)
+    assert stats["cpuPercent"] is None or isinstance(stats["cpuPercent"], float)
+
+
+def test_capabilities_include_burnin_when_ffmpeg_present():
+    caps = worker_mod.capabilities()
+    assert "transcribe" in caps and "translate" in caps
+    assert ("burnin" in caps) == (shutil.which("ffmpeg") is not None)
+
+
+def test_claim_acks_task_before_returning_it(monkeypatch):
+    task = {"taskId": "task_1", "type": "transcribe",
+            "inputUrl": "/api/tasks/task_1/input", "inputKind": "file"}
+    posted = {}
+
+    def fake_get(url, params=None, timeout=None):
+        assert params == {"type": "transcribe", "workerId": worker_mod.WORKER_ID}
+        return FakeResponse(200, task)
+
+    def fake_post(path, payload, timeout=30):
+        posted["path"] = path
+        posted["payload"] = payload
+        return FakeResponse(200, {"ok": True})
+
+    monkeypatch.setattr(worker_mod.requests, "get", fake_get)
+    monkeypatch.setattr(worker_mod, "manager_post", fake_post)
+    assert worker_mod.claim("transcribe") == task
+    assert posted["path"] == "/api/tasks/task_1/ack"
+    assert posted["payload"] == {"workerId": worker_mod.WORKER_ID}
+
+
+def test_claim_returns_none_when_ack_rejected(monkeypatch):
+    task = {"taskId": "task_1", "type": "transcribe",
+            "inputUrl": "/api/tasks/task_1/input", "inputKind": "file"}
+
+    def fake_get(url, params=None, timeout=None):
+        return FakeResponse(200, task)
+
+    def fake_post(path, payload, timeout=30):
+        return FakeResponse(409, text="task is not assigned")
+
+    monkeypatch.setattr(worker_mod.requests, "get", fake_get)
+    monkeypatch.setattr(worker_mod, "manager_post", fake_post)
+    assert worker_mod.claim("transcribe") is None
+
+
+def test_heartbeat_reports_capabilities_and_stats(monkeypatch):
+    posted = {}
+
+    def fake_post(path, payload, timeout=30):
+        posted["path"] = path
+        posted["payload"] = payload
+        return FakeResponse(200, {"id": "x", "registered": False})
+
+    monkeypatch.setattr(worker_mod, "manager_post", fake_post)
+    worker_mod.heartbeat()
+    assert posted["path"] == "/api/workers/heartbeat"
+    payload = posted["payload"]
+    assert "transcribe" in payload["capabilities"]
+    assert "translate" in payload["capabilities"]
+    assert isinstance(payload["ffmpeg"], bool)
+    assert set(payload["stats"]) == {"loadAvg1", "cpuPercent", "memUsedMb", "memTotalMb"}
+    assert payload["load"] in (0, 1)
+    assert payload["version"] == worker_mod.VERSION

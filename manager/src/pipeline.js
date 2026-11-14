@@ -17,7 +17,24 @@ import { planBurnSegments, shiftSegments } from './burnPlan.js';
 import { probe, extractAudio, splitAudio, listKeyframes, splitVideo, checkConcatCompatible, concatVideos, muxSoft } from './ffmpeg.js';
 
 export const STALE_ASSIGNED_MS = 15 * 60 * 1000;
-export const MAX_ATTEMPTS = 2; // first try + one retry
+// Un-acked assignments are re-offered quickly; the 15-minute stale sweep
+// below stays as the backstop for acked-but-silent tasks.
+export const ACK_TIMEOUT_MS = 45 * 1000;
+export const UNACKED_SWEEP_MS = 10 * 1000;
+// A worker that has not heartbeated within this long is presumed dead;
+// its assigned tasks are re-queued by verifyAssignedWorkers().
+export const WORKER_SILENT_MS = 45 * 1000;
+// A failed task prefers another worker, but the exclusion expires after
+// this long so a single-worker deployment can still retry it.
+export const EXCLUDE_GRACE_MS = 60 * 1000;
+// Per-stage retry budgets (total attempts, owned by the pipeline layer —
+// the scheduler only records the failure). Translate gets more tries
+// because Gemini calls fail transiently more often; burn-in gets one:
+// a failed encode is deterministic far more often than transient.
+export const RETRY_BUDGET = { transcribe: 2, translate: 3, burnin: 1 };
+// Cap on simultaneous in-flight (assigned) tasks across the LAN.
+// Overridable with MAX_IN_FLIGHT_TASKS.
+export const DEFAULT_MAX_IN_FLIGHT = 16;
 
 const ACTIVE_STAGES = new Set(['preparing', 'transcribing', 'merging', 'resegmenting', 'translating', 'synthesizing']);
 
@@ -26,6 +43,9 @@ export class Runner {
     this.store = store;
     this.llm = llmConfig(opts.env || process.env);
     this.running = new Set();
+    const env = opts.env || process.env;
+    this.maxInFlight = Number(env.MAX_IN_FLIGHT_TASKS || DEFAULT_MAX_IN_FLIGHT) || DEFAULT_MAX_IN_FLIGHT;
+    this.ackTimeoutMs = Number(env.ACK_TIMEOUT_MS || ACK_TIMEOUT_MS) || ACK_TIMEOUT_MS;
   }
 
   log(job, msg) {
@@ -39,6 +59,101 @@ export class Runner {
     job.error = String(err?.message || err);
     this.log(job, 'FAILED: ' + job.error);
     this.store.saveJob(job);
+  }
+
+  // ---- task / scheduler helpers ----
+  /** A fresh task. `ack` tracks whether the claiming worker confirmed
+   * receipt; `attempts` counts acked runs, not claims. */
+  newTask(type, extra = {}) {
+    return {
+      id: newId('task'),
+      type,
+      state: 'queued',
+      attempts: 0,
+      weight: 0,
+      queuedAt: new Date().toISOString(),
+      ack: false,
+      ackDeadline: null,
+      workerId: null,
+      assignedAt: null,
+      excludeWorker: null,
+      requeuedAt: null,
+      error: null,
+      ...extra,
+    };
+  }
+
+  findTask(taskId) {
+    for (const job of this.store.listJobs()) {
+      const task = job.tasks.find((t) => t.id === taskId);
+      if (task) return { job, task };
+    }
+    return null;
+  }
+
+  /** Total attempts allowed for one task of this type. */
+  retryBudgetFor(type) {
+    return RETRY_BUDGET[type] ?? 2;
+  }
+
+  /** Registry record for a claiming worker, by the id the worker reports
+   * (workerId) or the manager-assigned id. Null when unknown. */
+  findWorkerForClaim(workerId) {
+    if (!workerId) return null;
+    const workers = typeof this.store.listWorkers === 'function' ? this.store.listWorkers() : [];
+    return workers.find((w) => w.workerId === workerId || w.id === workerId) || null;
+  }
+
+  /** Capability check: unknown workers and workers that never reported
+   * capabilities are assumed able to do everything (back-compat). */
+  workerCanDo(worker, type) {
+    if (!worker) return true;
+    if (!Array.isArray(worker.capabilities)) return true;
+    return worker.capabilities.includes(type);
+  }
+
+  /** A job counts as started once any of its tasks is done or assigned. */
+  jobStarted(job) {
+    return job.tasks.some((t) => t.state === 'done' || t.state === 'assigned');
+  }
+
+  /** Effective scheduling weight: base weight + 1 for a started job, so a
+   * started job's remaining segments are preferred over a new job. */
+  effectiveWeight(job, task) {
+    return (task.weight || 0) + (this.jobStarted(job) ? 1 : 0);
+  }
+
+  /** Tasks currently out with workers (acked or not). */
+  inFlightCount() {
+    let n = 0;
+    for (const job of this.store.listJobs()) {
+      if (!ACTIVE_STAGES.has(job.stage)) continue;
+      for (const task of job.tasks) {
+        if (task.state === 'assigned') n += 1;
+      }
+    }
+    return n;
+  }
+
+  /** Return an assigned task to the queue, or fail it when its per-stage
+   * retry budget is spent. Retries go to the back of their weight class. */
+  requeueTask(job, task, reason) {
+    task.excludeWorker = task.workerId;
+    task.workerId = null;
+    task.assignedAt = null;
+    task.ack = false;
+    task.ackDeadline = null;
+    const nowIso = new Date().toISOString();
+    task.requeuedAt = nowIso;
+    task.queuedAt = nowIso;
+    if (task.attempts >= this.retryBudgetFor(task.type)) {
+      task.state = 'failed';
+      task.error = task.error || reason;
+      this.log(job, `Task ${task.id} (${task.type}) failed: ${task.error} (attempts exhausted)`);
+    } else {
+      task.state = 'queued';
+      this.log(job, `Task ${task.id} (${task.type}) re-queued: ${reason}`);
+    }
   }
 
   // ---- job creation ----
@@ -134,17 +249,7 @@ export class Runner {
       job.chunks.push({ ...c, file: path.relative(this.store.jobDir(job.id), file), state: 'queued' });
     }
     this.log(job, `Split into ${chunks.length} chunk(s), ${job.config.chunkMin} min + ${job.config.overlapSec}s overlap`);
-    job.tasks = chunks.map((c) => ({
-      id: newId('task'),
-      type: 'transcribe',
-      chunkIndex: c.index,
-      state: 'queued',
-      attempts: 0,
-      workerId: null,
-      assignedAt: null,
-      excludeWorker: null,
-      error: null,
-    }));
+    job.tasks = chunks.map((c) => this.newTask('transcribe', { chunkIndex: c.index }));
     job.stage = 'transcribing';
   }
 
@@ -213,17 +318,7 @@ export class Runner {
         job.stage = 'synthesizing';
       } else {
         const groups = groupSegments(segments);
-        job.tasks.push(...groups.map((g) => ({
-          id: newId('task'),
-          type: 'translate',
-          groupIndex: g.groupIndex,
-          state: 'queued',
-          attempts: 0,
-          workerId: null,
-          assignedAt: null,
-          excludeWorker: null,
-          error: null,
-        })));
+        job.tasks.push(...groups.map((g) => this.newTask('translate', { groupIndex: g.groupIndex })));
         this.log(job, `Created ${groups.length} translate task(s)`);
         job.stage = 'translating';
       }
@@ -299,17 +394,7 @@ export class Runner {
         state: 'queued',
       });
     }
-    job.tasks.push(...plan.map((seg) => ({
-      id: newId('task'),
-      type: 'burnin',
-      segmentIndex: seg.index,
-      state: 'queued',
-      attempts: 0,
-      workerId: null,
-      assignedAt: null,
-      excludeWorker: null,
-      error: null,
-    })));
+    job.tasks.push(...plan.map((seg) => this.newTask('burnin', { segmentIndex: seg.index })));
     this.log(job, `Planned ${plan.length} burn-in segment(s), ~${job.config.burnChunkMin} min each`);
   }
 
@@ -359,27 +444,63 @@ export class Runner {
   }
 
   // ---- task claiming / results (worker-pull) ----
+  // Offers the best queued task of the requested type to this worker:
+  // only tasks the worker is capable of, below the in-flight cap,
+  // ordered by effective weight DESC, then queuedAt ASC.
+  // Claiming reserves the task but does NOT count an attempt — the
+  // attempt is counted when the worker acks receipt (see ackTask).
   claimTask(type, workerId) {
     const now = Date.now();
+    const worker = this.findWorkerForClaim(workerId);
+    if (!this.workerCanDo(worker, type)) return null;
+    if (this.inFlightCount() >= this.maxInFlight) return null;
+    const candidates = [];
     for (const job of this.store.listJobs()) {
       if (!ACTIVE_STAGES.has(job.stage)) continue;
-      // A failed task prefers another worker, but the exclusion expires
-      // after 60s so a single-worker deployment can still retry it.
-      const tasks = job.tasks.filter((t) => {
-        if (t.type !== type || t.state !== 'queued') return false;
-        if (t.excludeWorker !== workerId) return true;
-        return t.requeuedAt && now - new Date(t.requeuedAt).getTime() > 60000;
-      });
-      if (tasks.length === 0) continue;
-      const task = tasks[0];
-      task.state = 'assigned';
-      task.workerId = workerId;
-      task.assignedAt = new Date().toISOString();
+      for (const task of job.tasks) {
+        if (task.type !== type || task.state !== 'queued') continue;
+        // A failed task prefers another worker, but the exclusion expires
+        // after EXCLUDE_GRACE_MS so a single-worker deployment can retry.
+        if (task.excludeWorker === workerId &&
+            !(task.requeuedAt && now - new Date(task.requeuedAt).getTime() > EXCLUDE_GRACE_MS)) continue;
+        candidates.push({ job, task, weight: this.effectiveWeight(job, task) });
+      }
+    }
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) =>
+      (b.weight - a.weight) ||
+      (new Date(a.task.queuedAt || a.job.createdAt) - new Date(b.task.queuedAt || b.job.createdAt)) ||
+      String(a.job.createdAt || '').localeCompare(String(b.job.createdAt || '')));
+    const { job, task } = candidates[0];
+    task.state = 'assigned';
+    task.workerId = workerId;
+    task.assignedAt = new Date().toISOString();
+    task.ack = false;
+    task.ackDeadline = new Date(now + this.ackTimeoutMs).toISOString();
+    this.store.saveJob(job);
+    return { job, task };
+  }
+
+  /** The claiming worker confirms receipt. Idempotent: a second ack for
+   * the same assignment does not count another attempt. Throws with
+   * err.status 409 (not assigned) or 403 (another worker's task). */
+  ackTask(job, task, workerId) {
+    if (task.state !== 'assigned') {
+      const err = new Error('task is not assigned');
+      err.status = 409;
+      throw err;
+    }
+    if (task.workerId !== workerId) {
+      const err = new Error('task is assigned to another worker');
+      err.status = 403;
+      throw err;
+    }
+    if (!task.ack) {
+      task.ack = true;
       task.attempts += 1;
       this.store.saveJob(job);
-      return { job, task };
     }
-    return null;
+    return { job, task };
   }
 
   taskInput(job, task) {
@@ -459,45 +580,98 @@ export class Runner {
       this.log(job, `Task ${task.id} (${task.type}) done by ${task.workerId}`);
     } else {
       task.error = String(error || 'worker reported failure');
-      if (task.attempts >= MAX_ATTEMPTS) {
-        task.state = 'failed';
-        this.log(job, `Task ${task.id} (${task.type}) failed permanently: ${task.error}`);
-      } else {
-        task.state = 'queued';
-        task.excludeWorker = task.workerId; // retry on another worker
-        task.workerId = null;
-        task.assignedAt = null;
-        task.requeuedAt = new Date().toISOString();
-        this.log(job, `Task ${task.id} (${task.type}) failed, re-queued: ${task.error}`);
-      }
+      this.requeueTask(job, task, 'worker failure');
     }
     this.store.saveJob(job);
   }
 
-  /** Re-queue assignments that have been silent too long. */
-  sweepStale() {
-    const now = Date.now();
+  /** Re-queue assignments that have been silent too long (backstop for
+   * acked-but-silent tasks; the fast paths are sweepUnacked and
+   * verifyAssignedWorkers). */
+  sweepStale(nowMs = Date.now()) {
     for (const job of this.store.listJobs()) {
       if (!ACTIVE_STAGES.has(job.stage)) continue;
       let changed = false;
       for (const task of job.tasks) {
         if (task.state !== 'assigned' || !task.assignedAt) continue;
-        if (now - new Date(task.assignedAt).getTime() > STALE_ASSIGNED_MS) {
-          task.excludeWorker = task.workerId;
-          task.workerId = null;
-          task.assignedAt = null;
-          task.requeuedAt = new Date().toISOString();
-          if (task.attempts >= MAX_ATTEMPTS) {
-            task.state = 'failed';
-            task.error = 'timed out';
-          } else {
-            task.state = 'queued';
-          }
-          this.log(job, `Task ${task.id} timed out, re-queued`);
+        if (nowMs - new Date(task.assignedAt).getTime() > STALE_ASSIGNED_MS) {
+          task.error = 'timed out';
+          this.requeueTask(job, task, 'timed out');
           changed = true;
         }
       }
       if (changed) this.store.saveJob(job);
     }
+  }
+
+  /** Re-offer assignments whose worker never acked receipt. An un-acked
+   * assignment never consumed an attempt, so it always re-queues. Runs on
+   * a short loop (UNACKED_SWEEP_MS); returns how many were re-offered. */
+  sweepUnacked(nowMs = Date.now()) {
+    let requeued = 0;
+    for (const job of this.store.listJobs()) {
+      if (!ACTIVE_STAGES.has(job.stage)) continue;
+      let changed = false;
+      for (const task of job.tasks) {
+        if (task.state !== 'assigned' || task.ack) continue;
+        const deadline = task.ackDeadline
+          ? new Date(task.ackDeadline).getTime()
+          : (task.assignedAt ? new Date(task.assignedAt).getTime() + this.ackTimeoutMs : 0);
+        if (nowMs <= deadline) continue;
+        this.requeueTask(job, task, 'ack timeout');
+        changed = true;
+        requeued += 1;
+      }
+      if (changed) this.store.saveJob(job);
+    }
+    return requeued;
+  }
+
+  /** Re-queue tasks assigned to workers that stopped heartbeating, and
+   * mark those workers offline. A live worker heartbeats every 15 s even
+   * while a task is running, so a silent worker is presumed dead.
+   * Returns how many tasks were re-queued. */
+  verifyAssignedWorkers(nowMs = Date.now()) {
+    const workers = typeof this.store.listWorkers === 'function' ? this.store.listWorkers() : [];
+    const byId = new Map();
+    for (const w of workers) {
+      if (w.workerId) byId.set(w.workerId, w);
+      byId.set(w.id, w);
+    }
+    let requeued = 0;
+    for (const job of this.store.listJobs()) {
+      if (!ACTIVE_STAGES.has(job.stage)) continue;
+      let changed = false;
+      for (const task of job.tasks) {
+        if (task.state !== 'assigned' || !task.workerId) continue;
+        const worker = byId.get(task.workerId);
+        const lastSeen = worker?.lastSeen ? new Date(worker.lastSeen).getTime() : 0;
+        if (worker && nowMs - lastSeen <= WORKER_SILENT_MS) continue;
+        task.error = 'worker silent';
+        this.requeueTask(job, task, 'worker silent');
+        changed = true;
+        requeued += 1;
+      }
+      if (changed) this.store.saveJob(job);
+    }
+    let workersChanged = false;
+    for (const w of workers) {
+      if (w.status === 'online' && w.lastSeen &&
+          nowMs - new Date(w.lastSeen).getTime() > WORKER_SILENT_MS) {
+        w.status = 'offline';
+        workersChanged = true;
+      }
+    }
+    if (workersChanged) this.store.saveWorkers(workers);
+    return requeued;
+  }
+
+  /** Run at manager startup: sweep stale assignments now, so tasks
+   * orphaned by a manager restart are not stuck until the periodic
+   * sweep. The heartbeat-liveness pass runs shortly after boot (the
+   * server schedules verifyAssignedWorkers) once live workers have had
+   * a chance to re-heartbeat. */
+  reconcileOnBoot() {
+    this.sweepStale();
   }
 }

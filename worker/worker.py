@@ -2,7 +2,11 @@
 transcription and Gemini translation, and reports results.
 
 The worker never accepts inbound task assignments; it pulls work from the
-manager (GET /api/tasks/next) and serves only a small health API locally.
+manager (GET /api/tasks/next), acks receipt of a claimed task immediately
+(POST /api/tasks/:id/ack), and serves only a small health API locally.
+It advertises its capabilities (transcribe / translate / burnin) and host
+load stats on every heartbeat; the heartbeat runs on its own thread so a
+long task does not make the worker look dead.
 
 Environment:
   MANAGER_URL   manager base URL, e.g. http://192.168.1.5:9400 (required)
@@ -15,6 +19,7 @@ Environment:
 """
 import logging
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -32,7 +37,7 @@ import burnin
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("lantask-worker")
 
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 MANAGER_URL = os.environ.get("MANAGER_URL", "").rstrip("/")
 WORKER_PORT = int(os.environ.get("WORKER_PORT", "9500"))
 WORKER_HOST = os.environ.get("WORKER_HOST", socket.gethostname())
@@ -112,6 +117,49 @@ def transcribe_file(path: str, model_name: str, language):
     return out
 
 
+def capabilities():
+    """Task kinds this worker can do. Burn-in needs ffmpeg on PATH."""
+    caps = ["transcribe", "translate"]
+    if shutil.which("ffmpeg"):
+        caps.append("burnin")
+    return caps
+
+
+def collect_stats():
+    """Best-effort host load stats for the heartbeat. No new dependencies:
+    psutil when installed, else load average + /proc/meminfo on Linux.
+    Missing values stay None."""
+    stats = {"loadAvg1": None, "cpuPercent": None, "memUsedMb": None, "memTotalMb": None}
+    try:
+        load1, _, _ = os.getloadavg()
+        stats["loadAvg1"] = round(load1, 2)
+    except OSError:
+        pass
+    try:
+        import psutil
+
+        stats["cpuPercent"] = round(psutil.cpu_percent(interval=None), 1)
+        mem = psutil.virtual_memory()
+        stats["memUsedMb"] = round(mem.used / (1024 * 1024))
+        stats["memTotalMb"] = round(mem.total / (1024 * 1024))
+        return stats
+    except ImportError:
+        pass
+    try:
+        meminfo = {}
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].endswith(":"):
+                    meminfo[parts[0][:-1]] = int(parts[1])
+        if "MemTotal" in meminfo and "MemAvailable" in meminfo:
+            stats["memTotalMb"] = round(meminfo["MemTotal"] / 1024)
+            stats["memUsedMb"] = round((meminfo["MemTotal"] - meminfo["MemAvailable"]) / 1024)
+    except OSError:
+        pass
+    return stats
+
+
 # ---- manager client ----
 def manager_post(path, payload, timeout=30):
     return requests.post(f"{MANAGER_URL}{path}", json=payload, timeout=timeout)
@@ -127,11 +175,35 @@ def heartbeat():
             "load": 1 if _state["current_task"] else 0,
             "model": _state["model"] or DEFAULT_MODEL,
             "version": VERSION,
+            "capabilities": capabilities(),
+            "ffmpeg": shutil.which("ffmpeg") is not None,
+            "stats": collect_stats(),
         })
         if resp.status_code != 200:
             log.warning("heartbeat rejected: %s %s", resp.status_code, resp.text[:200])
     except requests.RequestException as e:
         log.warning("heartbeat failed: %s", e)
+
+
+def heartbeat_loop():
+    while True:
+        heartbeat()
+        time.sleep(HEARTBEAT_INTERVAL)
+
+
+def ack_task(task_id: str):
+    """Confirm receipt of a claimed task. Returns True when the manager
+    still holds the assignment for us; False means it was re-offered (or
+    the ack could not be delivered) — the task must not be run."""
+    try:
+        resp = manager_post(f"/api/tasks/{task_id}/ack", {"workerId": WORKER_ID}, timeout=10)
+    except requests.RequestException as e:
+        log.warning("ack %s failed: %s", task_id, e)
+        return False
+    if resp.status_code != 200:
+        log.warning("ack %s rejected: %s %s", task_id, resp.status_code, resp.text[:200])
+        return False
+    return True
 
 
 def claim(task_type: str):
@@ -149,7 +221,10 @@ def claim(task_type: str):
     if resp.status_code != 200:
         log.warning("claim %s rejected: %s %s", task_type, resp.status_code, resp.text[:200])
         return None
-    return resp.json()
+    task = resp.json()
+    if not ack_task(task["taskId"]):
+        return None
+    return task
 
 
 def download_input(task):
@@ -265,13 +340,8 @@ def run_translate(task):
 
 def poll_loop():
     log.info("worker %s polling %s", WORKER_ID, MANAGER_URL)
-    last_heartbeat = 0.0
     while True:
         try:
-            now = time.time()
-            if now - last_heartbeat >= HEARTBEAT_INTERVAL:
-                heartbeat()
-                last_heartbeat = now
             task = claim("transcribe") or claim("translate") or claim("burnin")
             if not task:
                 time.sleep(POLL_INTERVAL)
@@ -299,6 +369,9 @@ def poll_loop():
 def main():
     if not MANAGER_URL:
         raise SystemExit("MANAGER_URL is required (e.g. http://192.168.1.5:9400)")
+    # Heartbeat on its own thread: a long task must not make the worker
+    # look dead to the manager's liveness checks.
+    threading.Thread(target=heartbeat_loop, daemon=True).start()
     thread = threading.Thread(target=poll_loop, daemon=True)
     thread.start()
     uvicorn.run(app, host="0.0.0.0", port=WORKER_PORT, log_level="warning")

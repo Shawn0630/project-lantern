@@ -223,3 +223,22 @@ and finished `done`. Only the failed segment re-ran.
   independent task on the same claim path, so distribution is the same
   code path regardless of worker count.
 - The web UI in a real browser — served (200) and fetched, not clicked.
+
+---
+
+# v1.2 probe — scheduler improvements (2026-11-14)
+
+Same harness, fresh data dir `probe/data-v12`, same 67.2 s video, tiny
+model, stubbed Gemini. Job `job_mwgy2x8h8c8hzx`, ~35 s submit → done.
+
+- 3 transcribe + 1 translate + 1 burn-in task, 5/5 done. All tasks
+  `ack=true`, `attempts=1` — the ack counted exactly one attempt each.
+- Merged 19 → re-segmented 18 → translated 18; `source.srt` and
+  `translated.srt` 18 entries each, every translated line `[TR]`.
+- `video.mp4` 67.33 s (8.4 MB), `soft.mp4` 67.2 s (7.0 MB);
+  `GET /api/jobs/:id/download/source.srt` returns 200.
+- Live capability/load reporting verified: the worker record in
+  `GET /api/workers` shows `capabilities: ["transcribe","translate",
+  "burnin"]`, `ffmpeg: true`, and `stats: {loadAvg1, cpuPercent: null
+  (no psutil), memUsedMb, memTotalMb}`; the manager reports version
+  `1.2.0`, the worker `1.2.0`.
