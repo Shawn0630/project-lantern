@@ -12,3 +12,6 @@ __pycache__/
 probe/hf-cache/
 probe/*.log
 probe/test-video.mp4
+probe/*.pid
+probe/*.id
+probe/data-v11/

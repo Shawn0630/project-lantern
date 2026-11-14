@@ -6,8 +6,10 @@
 //   jobs/<id>/chunks/chunk_000.wav
 //   jobs/<id>/results/transcribe_<i>.json | translate_<i>.json
 //   jobs/<id>/merged.json | resegmented.json | translated.json
+//   jobs/<id>/burn/seg_000.mp4 | ass_000.ass   — burn-in segment video + ASS
+//   jobs/<id>/results/burnin_<i>.mp4          — worker-burned segments
 //   jobs/<id>/source.srt | translated.srt | bilingual.srt
-//   jobs/<id>/video.mp4 | soft.mp4 | video.ass
+//   jobs/<id>/video.mp4 | soft.mp4
 import fs from 'node:fs';
 import path from 'node:path';
 

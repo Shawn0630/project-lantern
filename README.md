@@ -54,9 +54,18 @@ transcription (transcribe → merge → translate → subtitle synthesis).
    distributed to workers. The worker calls Gemini with a numbered-lines
    prompt and must return exactly the same number of lines; the manager
    verifies counts on merge and retries a mismatched task once.
-7. **Synthesize** (manager) — ffmpeg burns the subtitles into
-   `video.mp4` (ASS styling, clean white-on-black-outline) and muxes a
-   soft-sub `soft.mp4`. `source.srt` and `translated.srt` are always
+7. **Burn-in** (workers) — the manager splits the video into burn
+   segments (~5 min each, `burnChunkMin`, boundaries snapped into
+   subtitle gaps so no line is ever cut in half), cuts each segment with
+   ffmpeg stream copy, and hands one `burnin` task per segment to a
+   worker (segment video + per-segment ASS with times shifted to the
+   segment). The worker burns with libx264 CRF 20, re-encoding audio to
+   AAC, keeping the source resolution and frame rate exactly. A failed
+   segment retries only that segment. The manager verifies all burned
+   segments share codec/resolution/fps, then concatenates them
+   (stream copy, no re-encode) into `video.mp4`.
+8. **Soft-sub** (manager) — `soft.mp4` muxes the SRT as a mov_text
+   track (stream copy). `source.srt` and `translated.srt` are always
    emitted (plus `bilingual.srt` when enabled).
 
 Task states: `queued → assigned → done/failed`. A failed task retries
@@ -108,6 +117,7 @@ Workers page. To give it a name up front, use the Workers page
 | Whisper model | small | tiny for tests; large-v3 for quality |
 | Chunk minutes | 10 | 0.5–120 |
 | Overlap seconds | 10 | must be < chunk length |
+| Burn chunk minutes | 5 | 0.5–120; boundaries snap to subtitle gaps |
 | Translate | on | off = transcription only |
 | Burn-in subtitles | on | off = soft-sub mp4 only |
 | Bilingual subtitles | off | source + target lines |
@@ -117,7 +127,8 @@ Workers page. To give it a name up front, use the Workers page
 - The Gemini API key is passed to workers inside translate task payloads
   (LAN-trusted v1 simplification — only run workers you trust).
 - Translation needs network access to Google's Gemini API from the worker.
-- Burn-in / muxing runs on the manager (CPU ffmpeg).
+- Burn-in is distributed: workers burn segments; the manager only cuts
+  segments and concatenates. The manager never runs a burn-in encode.
 - No TTS/dubbing, no speaker diarization, no VAD.
 - The manager stores all state as JSON files under `data/`; there is no
   authentication on the API (LAN use only).

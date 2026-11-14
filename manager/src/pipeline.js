@@ -13,7 +13,8 @@ import { toSrt, toAss } from './srt.js';
 import { resegmentByWords, llmPolishSegments } from './resegment.js';
 import { groupSegments, verifyTranslateResult } from './translate.js';
 import { llmConfig, generateText } from './llm.js';
-import { probe, extractAudio, splitAudio, burnIn, muxSoft } from './ffmpeg.js';
+import { planBurnSegments, shiftSegments } from './burnPlan.js';
+import { probe, extractAudio, splitAudio, listKeyframes, splitVideo, checkConcatCompatible, concatVideos, muxSoft } from './ffmpeg.js';
 
 export const STALE_ASSIGNED_MS = 15 * 60 * 1000;
 export const MAX_ATTEMPTS = 2; // first try + one retry
@@ -49,11 +50,13 @@ export class Runner {
       model: fields.model || 'small',
       chunkMin: Number(fields.chunkMin || 10),
       overlapSec: Number(fields.overlapSec ?? 10),
+      burnChunkMin: Number(fields.burnChunkMin || 5),
       translate: fields.translate !== 'false' && fields.translate !== false,
       burnIn: fields.burnIn !== 'false' && fields.burnIn !== false,
       bilingual: fields.bilingual === 'true' || fields.bilingual === true,
     };
     if (!(config.chunkMin >= 0.5 && config.chunkMin <= 120)) throw new Error('chunkMin must be 0.5–120');
+    if (!(config.burnChunkMin >= 0.5 && config.burnChunkMin <= 120)) throw new Error('burnChunkMin must be 0.5–120');
     if (!(config.overlapSec >= 0 && config.overlapSec < config.chunkMin * 60)) {
       throw new Error('overlapSec must be >= 0 and < chunk length');
     }
@@ -65,6 +68,7 @@ export class Runner {
       stage: 'preparing',
       duration: 0,
       chunks: [],
+      burnSegments: [],
       tasks: [],
       logs: [],
       outputs: {},
@@ -114,6 +118,11 @@ export class Runner {
     const info = await probe(inputPath);
     if (!info.hasAudio) throw new Error('input has no audio stream');
     job.duration = info.duration;
+    job.hasVideo = info.hasVideo;
+    job.videoInfo = {
+      fps: info.fps, width: info.width, height: info.height,
+      videoCodec: info.videoCodec, audioBitrate: info.audioBitrate,
+    };
     this.log(job, `Probed: ${info.duration.toFixed(1)}s, audio=${info.hasAudio}, video=${info.hasVideo}`);
     const wav = this.store.jobPath(job.id, 'audio.wav');
     await extractAudio(inputPath, wav);
@@ -252,6 +261,69 @@ export class Runner {
     job.stage = 'synthesizing';
   }
 
+  burninTasks(job) {
+    return job.tasks.filter((t) => t.type === 'burnin');
+  }
+
+  /** Plan burn segments, cut the video, write per-segment ASS, create tasks. */
+  async planBurn(job, mainSegs, inputPath) {
+    const plan = planBurnSegments(job.duration, mainSegs, job.config.burnChunkMin * 60);
+    const keyframes = await listKeyframes(inputPath);
+    const keyframeAtOrBefore = (t) => {
+      let at = 0;
+      for (const k of keyframes) {
+        if (k <= t) at = k;
+        else break;
+      }
+      return at;
+    };
+    const burnDir = this.store.jobPath(job.id, 'burn');
+    fs.mkdirSync(burnDir, { recursive: true });
+    const pad = (i) => String(i).padStart(3, '0');
+    job.burnSegments = [];
+    for (const seg of plan) {
+      const actualStart = keyframeAtOrBefore(seg.start);
+      const trimStart = Math.round((seg.start - actualStart) * 1000) / 1000;
+      const videoFile = path.join('burn', `seg_${pad(seg.index)}.mp4`);
+      await splitVideo(inputPath, actualStart, Math.round((seg.end - actualStart) * 1000) / 1000, this.store.jobPath(job.id, videoFile));
+      const assFile = path.join('burn', `ass_${pad(seg.index)}.ass`);
+      fs.writeFileSync(this.store.jobPath(job.id, assFile), toAss(shiftSegments(seg.subtitles, -seg.start)));
+      job.burnSegments.push({
+        index: seg.index,
+        start: seg.start,
+        end: seg.end,
+        file: videoFile,
+        assFile,
+        trimStart,
+        duration: Math.round((seg.end - seg.start) * 1000) / 1000,
+        state: 'queued',
+      });
+    }
+    job.tasks.push(...plan.map((seg) => ({
+      id: newId('task'),
+      type: 'burnin',
+      segmentIndex: seg.index,
+      state: 'queued',
+      attempts: 0,
+      workerId: null,
+      assignedAt: null,
+      excludeWorker: null,
+      error: null,
+    })));
+    this.log(job, `Planned ${plan.length} burn-in segment(s), ~${job.config.burnChunkMin} min each`);
+  }
+
+  /** Verify burned segments and concatenate them into the final video. */
+  async concatBurn(job) {
+    const segFiles = job.burnSegments.map((s) =>
+      this.store.jobPath(job.id, 'results', `burnin_${s.index}.mp4`));
+    await checkConcatCompatible(segFiles, job.videoInfo || null);
+    const out = this.store.jobPath(job.id, 'video.mp4');
+    await concatVideos(segFiles, out);
+    job.outputs.video = 'video.mp4';
+    this.log(job, `Burn-in video written: video.mp4 (concatenated from ${segFiles.length} segment(s))`);
+  }
+
   async synthesize(job) {
     const inputPath = this.store.jobPath(job.id, job.inputFile);
     const mainSrt = job.outputs.translatedSrt || job.outputs.sourceSrt;
@@ -266,12 +338,17 @@ export class Runner {
       mainSegs = source.map((seg, i) => ({ ...seg, text: `${seg.text}\n${translated[i]?.text || ''}` }));
     }
     if (job.config.burnIn) {
-      const assPath = this.store.jobPath(job.id, 'video.ass');
-      fs.writeFileSync(assPath, toAss(mainSegs));
-      const out = this.store.jobPath(job.id, 'video.mp4');
-      await burnIn(inputPath, assPath, out);
-      job.outputs.video = 'video.mp4';
-      this.log(job, 'Burn-in video written: video.mp4');
+      if (!job.hasVideo) throw new Error('burn-in requires a video stream (input has audio only)');
+      if (!job.burnSegments || job.burnSegments.length === 0) {
+        await this.planBurn(job, mainSegs, inputPath);
+        return; // wait for workers to burn the segments
+      }
+      const tasks = this.burninTasks(job);
+      if (tasks.some((t) => t.state === 'queued' || t.state === 'assigned')) return;
+      if (tasks.some((t) => t.state === 'failed')) {
+        throw new Error('a burn-in task failed after retries');
+      }
+      await this.concatBurn(job);
     }
     const softOut = this.store.jobPath(job.id, 'soft.mp4');
     const srtPath = this.store.jobPath(job.id, mainSrt);
@@ -285,7 +362,7 @@ export class Runner {
   claimTask(type, workerId) {
     const now = Date.now();
     for (const job of this.store.listJobs()) {
-      if (job.stage !== 'transcribing' && job.stage !== 'translating') continue;
+      if (!ACTIVE_STAGES.has(job.stage)) continue;
       // A failed task prefers another worker, but the exclusion expires
       // after 60s so a single-worker deployment can still retry it.
       const tasks = job.tasks.filter((t) => {
@@ -309,6 +386,28 @@ export class Runner {
     if (task.type === 'transcribe') {
       const chunk = job.chunks[task.chunkIndex];
       return { kind: 'file', path: this.store.jobPath(job.id, chunk.file), filename: path.basename(chunk.file) };
+    }
+    if (task.type === 'burnin') {
+      // JSON payload: the worker downloads the segment video + ASS itself.
+      const seg = job.burnSegments[task.segmentIndex];
+      const v = job.videoInfo || {};
+      return {
+        kind: 'json',
+        payload: {
+          taskId: task.id,
+          type: 'burnin',
+          videoUrl: `/api/tasks/${task.id}/input?part=video`,
+          assUrl: `/api/tasks/${task.id}/input?part=ass`,
+          trimStart: seg.trimStart,
+          duration: seg.duration,
+          crf: 20,
+          fps: v.fps ?? null,
+          width: v.width ?? null,
+          height: v.height ?? null,
+          videoCodec: v.videoCodec ?? null,
+          audioBitrate: v.audioBitrate ?? null,
+        },
+      };
     }
     // translate: JSON payload (segments + LLM credentials for the worker).
     const reseg = this.store.readJson(this.store.jobPath(job.id, 'resegmented.json'), { segments: [] });
@@ -338,6 +437,12 @@ export class Runner {
         );
         const chunk = job.chunks[task.chunkIndex];
         if (chunk) chunk.state = 'done';
+      } else if (task.type === 'burnin') {
+        if (!result || !result.file) throw new Error('bad burn-in result: missing file');
+        const resultPath = this.store.jobPath(job.id, 'results', `burnin_${task.segmentIndex}.mp4`);
+        if (!fs.existsSync(resultPath)) throw new Error('bad burn-in result: file missing');
+        const seg = job.burnSegments[task.segmentIndex];
+        if (seg) seg.state = 'done';
       } else {
         if (!result || !Array.isArray(result.lines)) throw new Error('bad translate result: missing lines');
         const reseg = this.store.readJson(this.store.jobPath(job.id, 'resegmented.json'), { segments: [] });

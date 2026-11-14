@@ -54,6 +54,7 @@
       </label>
       <label>Chunk minutes <input type="number" name="chunkMin" value="10" min="0.5" max="120" step="0.5"></label>
       <label>Overlap seconds <input type="number" name="overlapSec" value="10" min="0" max="120" step="1"></label>
+      <label>Burn chunk minutes <input type="number" name="burnChunkMin" value="5" min="0.5" max="120" step="0.5"></label>
       <label><input type="checkbox" name="translate" checked> Translate</label>
       <label><input type="checkbox" name="burnIn" checked> Burn-in subtitles</label>
       <label><input type="checkbox" name="bilingual"> Bilingual subtitles</label>
@@ -86,6 +87,11 @@
     <dl id="job-meta"></dl>
     <h3>Chunks</h3>
     <table id="chunks-table">
+      <thead><tr><th>#</th><th>Range</th><th>State</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h3>Burn segments</h3>
+    <table id="burn-table">
       <thead><tr><th>#</th><th>Range</th><th>State</th></tr></thead>
       <tbody></tbody>
     </table>

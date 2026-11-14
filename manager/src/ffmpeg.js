@@ -25,6 +25,12 @@ export async function probe(file) {
   const duration = Number(info.format?.duration || 0);
   const video = (info.streams || []).find((s) => s.codec_type === 'video');
   const audio = (info.streams || []).find((s) => s.codec_type === 'audio');
+  let fps = null;
+  const fpsRaw = video?.avg_frame_rate || '';
+  if (fpsRaw.includes('/')) {
+    const [n, d] = fpsRaw.split('/').map(Number);
+    if (d) fps = n / d;
+  }
   return {
     duration,
     hasVideo: Boolean(video),
@@ -32,7 +38,24 @@ export async function probe(file) {
     width: video?.width || null,
     height: video?.height || null,
     format: info.format?.format_name || '',
+    fps,
+    videoCodec: video?.codec_name || null,
+    audioCodec: audio?.codec_name || null,
+    audioBitrate: audio?.bit_rate ? Number(audio.bit_rate) : null,
   };
+}
+
+/** List keyframe timestamps (seconds) of the first video stream. */
+export async function listKeyframes(file) {
+  const { stdout } = await runCmd('ffprobe', [
+    '-v', 'error', '-skip_frame', 'nokey', '-select_streams', 'v:0',
+    '-show_entries', 'frame=pts_time', '-of', 'csv=p=0', file,
+  ]);
+  return stdout
+    .split('\n')
+    .map((l) => Number(l.trim()))
+    .filter((n) => Number.isFinite(n))
+    .sort((a, b) => a - b);
 }
 
 /** Extract 16 kHz mono WAV for ASR. */
@@ -45,15 +68,69 @@ export async function splitAudio(wav, start, dur, out) {
   await runCmd('ffmpeg', ['-y', '-ss', String(start), '-t', String(dur), '-i', wav, '-c', 'copy', out]);
 }
 
-/** Escape a path for ffmpeg's subtitles filter (escape : and '). */
-export function escapeFilterPath(p) {
-  return p.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'");
+/** Cut a video segment with stream copy: [start, start+dur). */
+export async function splitVideo(input, start, dur, out) {
+  await runCmd('ffmpeg', ['-y', '-ss', String(start), '-i', input, '-t', String(dur), '-c', 'copy', out]);
 }
 
-/** Burn ASS subtitles into the video (video re-encoded, audio copied). */
-export async function burnIn(video, assFile, out, { crf = 20 } = {}) {
-  const filter = `subtitles='${escapeFilterPath(assFile)}'`;
-  await runCmd('ffmpeg', ['-y', '-i', video, '-vf', filter, '-c:v', 'libx264', '-crf', String(crf), '-c:a', 'copy', out]);
+/** Build the ffmpeg concat-demuxer list file content. */
+export function concatListContent(files) {
+  return files.map((f) => `file '${String(f).replace(/'/g, "'\\''")}'`).join('\n') + '\n';
+}
+
+/**
+ * Verify all files share codec/resolution/fps with each other, and that
+ * resolution/fps match the source video (a worker must never resize or
+ * change the frame rate — concat requires identical parameters).
+ * `probeFn` is injectable for tests.
+ * @throws with the offending segment index and field on any mismatch.
+ */
+export async function checkConcatCompatible(files, sourceInfo, probeFn = probe) {
+  if (!files || files.length === 0) throw new Error('no burn-in segments to concatenate');
+  const infos = [];
+  for (const f of files) infos.push(await probeFn(f));
+  const reference = infos[0];
+  if (!reference.hasVideo) throw new Error('burn-in segment 0 has no video stream — refusing to concatenate');
+  for (let i = 0; i < infos.length; i++) {
+    const info = infos[i];
+    if (!info.hasVideo) throw new Error(`burn-in segment ${i} has no video stream — refusing to concatenate`);
+    for (const [field, got, want] of [
+      ['codec', info.videoCodec, reference.videoCodec],
+      ['width', info.width, reference.width],
+      ['height', info.height, reference.height],
+    ]) {
+      if (want != null && got !== want) {
+        throw new Error(`burn-in segment ${i} has ${field} ${got}, expected ${want} — refusing to concatenate`);
+      }
+    }
+    if (reference.fps != null && info.fps != null && Math.abs(info.fps - reference.fps) > 0.01) {
+      throw new Error(`burn-in segment ${i} has fps ${info.fps}, expected ${reference.fps} — refusing to concatenate`);
+    }
+    if (sourceInfo) {
+      for (const [field, got, want] of [
+        ['width', info.width, sourceInfo.width],
+        ['height', info.height, sourceInfo.height],
+      ]) {
+        if (want != null && got !== want) {
+          throw new Error(`burn-in segment ${i} has ${field} ${got}, source video has ${want} — refusing to concatenate`);
+        }
+      }
+      if (sourceInfo.fps != null && info.fps != null && Math.abs(info.fps - sourceInfo.fps) > 0.01) {
+        throw new Error(`burn-in segment ${i} has fps ${info.fps}, source video has ${sourceInfo.fps} — refusing to concatenate`);
+      }
+    }
+  }
+}
+
+/** Concatenate same-parameter video files (stream copy, no re-encode). */
+export async function concatVideos(files, out) {
+  const listPath = out + '.concat.txt';
+  fs.writeFileSync(listPath, concatListContent(files));
+  try {
+    await runCmd('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', out]);
+  } finally {
+    try { fs.unlinkSync(listPath); } catch { /* ignore */ }
+  }
 }
 
 /** Mux an SRT as a soft subtitle track (mov_text). */

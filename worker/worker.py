@@ -27,6 +27,7 @@ from fastapi import FastAPI
 import uvicorn
 
 from gemini import translate_lines
+import burnin
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("lantask-worker")
@@ -181,6 +182,52 @@ def report_result(task_id: str, status: str, result=None, error=None):
         log.warning("result for %s failed to send: %s", task_id, e)
 
 
+def download_url(rel_url, suffix):
+    """Download a manager-relative URL to a temp file; returns its path."""
+    resp = requests.get(f"{MANAGER_URL}{rel_url}", timeout=300)
+    resp.raise_for_status()
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        for chunk in resp.iter_content(chunk_size=1 << 20):
+            tmp.write(chunk)
+    finally:
+        tmp.close()
+    return tmp.name
+
+
+def upload_result_file(task_id, path):
+    """Upload a burned segment file as the task result (multipart)."""
+    with open(path, "rb") as fh:
+        resp = requests.post(
+            f"{MANAGER_URL}/api/tasks/{task_id}/result-file",
+            files={"file": (os.path.basename(path), fh, "video/mp4")},
+            data={"workerId": WORKER_ID, "status": "done"},
+            timeout=300,
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(f"result upload rejected: {resp.status_code} {resp.text[:200]}")
+
+
+def run_burnin(task):
+    kind, payload = download_input(task)
+    assert kind == "json"
+    video_path = download_url(payload["videoUrl"], ".mp4")
+    ass_path = download_url(payload["assUrl"], ".ass")
+    out_path = None
+    try:
+        out_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+        burnin.burnin_segment(video_path, ass_path, out_path, payload)
+        log.info("burned task %s: segment %s", task["taskId"], payload.get("duration"))
+        upload_result_file(task["taskId"], out_path)
+    finally:
+        for p in (video_path, ass_path, out_path):
+            if p:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+
 def run_transcribe(task):
     kind, data = download_input(task)
     assert kind == "file"
@@ -225,7 +272,7 @@ def poll_loop():
             if now - last_heartbeat >= HEARTBEAT_INTERVAL:
                 heartbeat()
                 last_heartbeat = now
-            task = claim("transcribe") or claim("translate")
+            task = claim("transcribe") or claim("translate") or claim("burnin")
             if not task:
                 time.sleep(POLL_INTERVAL)
                 continue
@@ -235,6 +282,8 @@ def poll_loop():
                     run_transcribe(task)
                 elif task["type"] == "translate":
                     run_translate(task)
+                elif task["type"] == "burnin":
+                    run_burnin(task)
                 else:
                     report_result(task["taskId"], "failed", error=f"unknown task type {task['type']}")
             except Exception as e:  # noqa: BLE001 - a task failure must not kill the loop

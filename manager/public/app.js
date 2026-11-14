@@ -87,6 +87,7 @@ async function loadJobDetail(id) {
     ['Target', job.config.targetLang],
     ['Model', job.config.model],
     ['Chunk', `${job.config.chunkMin} min / ${job.config.overlapSec}s overlap`],
+    ['Burn chunk', `${job.config.burnChunkMin} min`],
     ['Translate', job.config.translate ? 'yes' : 'no'],
     ['Burn-in', job.config.burnIn ? 'yes' : 'no'],
     ['Bilingual', job.config.bilingual ? 'yes' : 'no'],
@@ -95,6 +96,9 @@ async function loadJobDetail(id) {
   $('#job-meta').innerHTML = meta.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
   $('#chunks-table tbody').innerHTML = job.chunks.map((c) => `<tr>
     <td>${c.index}</td><td>${fmtTime(c.start)} – ${fmtTime(c.end)}</td><td>${esc(c.state)}</td>
+  </tr>`).join('') || '<tr><td colspan="3">—</td></tr>';
+  $('#burn-table tbody').innerHTML = (job.burnSegments || []).map((s) => `<tr>
+    <td>${s.index}</td><td>${fmtTime(s.start)} – ${fmtTime(s.end)}</td><td>${esc(s.state)}</td>
   </tr>`).join('') || '<tr><td colspan="3">—</td></tr>';
   $('#tasks-table tbody').innerHTML = job.tasks.map((t) => `<tr>
     <td>${esc(t.id)}</td><td>${esc(t.type)} ${t.chunkIndex ?? t.groupIndex ?? ''}</td>

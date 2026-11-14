@@ -133,3 +133,93 @@ curl -s http://127.0.0.1:9400/api/jobs/job_mwgpsol9nkoqwd
   but it was only exercised via the API here.
 - Multi-worker distribution — one worker only; the pull/claim protocol
   is the same code path regardless of worker count.
+
+---
+
+# LanTask v1.1 — Distributed segmented burn-in probe (2026-11-14)
+
+Same setup as v1 (67.2 s test video, real speech, faster-whisper `tiny`,
+stubbed Gemini on port 8077, single probe worker), but burn-in now runs
+on the worker in segments instead of on the manager. Probe data lives in
+`probe/data-v11/` (the v1 job in `data/` is untouched). The failure
+injector is `probe/inject-burnin-failure.sh`.
+
+## Commands
+
+```bash
+# 1. Stub Gemini + manager (fresh data dir) + worker, as in v1
+python3 probe/stub_gemini.py 8077
+PORT=9400 DATA_DIR=/home/hatch/workspace/lantask/probe/data-v11 node manager/server.js
+MANAGER_URL=http://127.0.0.1:9400 WORKER_PORT=9500 WORKER_ID=probe-worker-v11 \
+  WHISPER_MODEL=tiny GEMINI_BASE_URL=http://127.0.0.1:8077/v1beta \
+  HF_HOME=/home/hatch/workspace/lantask/probe/hf-cache worker/.venv/bin/python worker/worker.py
+
+# 2. Submit with small burn segments (0.5 min -> 3 burnin tasks)
+curl -X POST http://127.0.0.1:9400/api/jobs \
+  -F "video=@probe/test-video.mp4" -F "sourceLang=en" -F "targetLang=zh-CN" \
+  -F "model=tiny" -F "chunkMin=0.5" -F "overlapSec=5" -F "burnChunkMin=0.5" \
+  -F "translate=true" -F "burnIn=true" -F "bilingual=false"
+# -> {"id":"job_mwgrmljxw4dv7o"}
+
+# 3. Failure injection (run in parallel): freeze the worker the moment a
+#    burnin task is assigned, POST the task failed, resume the worker.
+bash probe/inject-burnin-failure.sh job_mwgrmljxw4dv7o
+```
+
+## Results (job `job_mwgrmljxw4dv7o`, ~84 s submit → done)
+
+- 3 transcribe + 1 translate tasks done as in v1; `source.srt` and
+  `translated.srt` are **byte-identical (md5) to the v1 job** — the
+  transcribe/translate path is untouched by the burn-in change.
+- Burn planning: 3 segments `[0, 33.38] [33.38, 63.44] [63.44, 67.2]`,
+  boundaries snapped to subtitle-gap midpoints near the 30 s / 60 s
+  targets; `trimStart` 0 / 0.047 / 5.107 s (segment 2's keyframe sits
+  5.1 s before its boundary — the worker's `-ss` trim handled it).
+- All 3 burnin tasks done; segment result durations 33.40 / 30.07 /
+  3.77 s vs planned 33.38 / 30.06 / 3.76 s (frame rounding only).
+- `video.mp4` — h264 640x360 + AAC, 67.36 s, decodes cleanly
+  (`ffmpeg -f null -` error-free); `soft.mp4` has a mov_text track and
+  also decodes cleanly.
+- Subtitles visually confirmed burned in: frames extracted at t=2 s
+  (segment 0) and t=40 s (segment 1) both show the translated text at
+  the bottom (`probe/frame-v11-t2.png`, `probe/frame-v11-t40.png`).
+- UI: `/` serves the updated page (contains "Burn segments" table and
+  `burnChunkMin` input); exercised by HTTP fetch only, not in a browser.
+
+## Retry verification (live, this probe)
+
+The injector froze the worker mid-burn of segment 0 and reported that
+task failed. The log shows `Task … (burnin) failed, re-queued:
+probe-injected failure`; the worker's own upload of the frozen run was
+rejected (409, task no longer assigned). After the 60 s exclusion
+expired the worker re-claimed segment 0 (attempts=2) and completed it;
+segments 1 and 2 finished on first attempt. The job then concatenated
+and finished `done`. Only the failed segment re-ran.
+
+## Issues found during the probe (all fixed in the repo)
+
+1. **Edit dropped `run_transcribe`.** An edit inserting the burn-in
+   helpers replaced the `def run_transcribe(task):` line, leaving its
+   body dangling inside `run_burnin` (dead code). The first probe job
+   failed all transcribe tasks with `name 'run_transcribe' is not
+   defined` (they re-queued correctly, which the failure path handled).
+   Fix: restored the `def` line; worker tests re-run green.
+2. **Burn-in input URL mismatch.** The task payload used
+   `/api/tasks/<id>/input/video` (path segment) while the route serves
+   `?part=video` (query). All burnin tasks 404'd on download. Fix:
+   payload now uses `?part=video` / `?part=ass`; unit test updated.
+3. **Stale watcher noise.** An injector left over from a deleted job
+   kept polling the deleted job id and logged `KeyError: 'tasks'` until
+   its 180 s loop expired. Harmless probe-script noise, not a product
+   bug; the injector now exits promptly and the log is per-run.
+
+## What this probe does NOT prove
+
+- Docker images / `docker compose up` — not built here (no Docker on
+  this VM). The worker Dockerfile now also COPYs `burnin.py`.
+- Real Gemini translation quality — still stubbed.
+- The `small` model (default) — probe used `tiny` for speed.
+- Multi-worker burn-in — one worker only; each segment is an
+  independent task on the same claim path, so distribution is the same
+  code path regardless of worker count.
+- The web UI in a real browser — served (200) and fetched, not clicked.

@@ -161,8 +161,8 @@ export function createRouter(store, runner) {
   // ---- tasks (worker-pull) ----
   router.get('/tasks/next', (req, res) => {
     const { type, workerId } = req.query;
-    if (type !== 'transcribe' && type !== 'translate') {
-      return res.status(400).json({ error: 'type must be transcribe or translate' });
+    if (type !== 'transcribe' && type !== 'translate' && type !== 'burnin') {
+      return res.status(400).json({ error: 'type must be transcribe, translate or burnin' });
     }
     if (!workerId) return res.status(400).json({ error: 'workerId is required' });
     const claimed = runner.claimTask(type, String(workerId));
@@ -175,6 +175,7 @@ export function createRouter(store, runner) {
       type: task.type,
       chunkIndex: task.chunkIndex ?? null,
       groupIndex: task.groupIndex ?? null,
+      segmentIndex: task.segmentIndex ?? null,
       model: job.config.model,
       sourceLang: job.config.sourceLang === 'auto' ? null : job.config.sourceLang,
       inputUrl: `/api/tasks/${task.id}/input`,
@@ -189,8 +190,16 @@ export function createRouter(store, runner) {
     if (task.state !== 'assigned') return res.status(409).json({ error: 'task is not assigned' });
     const input = runner.taskInput(job, task);
     if (input.kind === 'file') {
-      if (!fs.existsSync(input.path)) return res.status(404).json({ error: 'chunk file missing' });
+      if (!fs.existsSync(input.path)) return res.status(404).json({ error: 'task file missing' });
       res.download(input.path, input.filename);
+    } else if (task.type === 'burnin' && req.query.part) {
+      // Burn-in tasks fetch their two inputs separately.
+      const seg = job.burnSegments[task.segmentIndex];
+      const rel = req.query.part === 'video' ? seg?.file : req.query.part === 'ass' ? seg?.assFile : null;
+      if (!rel) return res.status(400).json({ error: 'part must be video or ass' });
+      const file = store.jobPath(job.id, rel);
+      if (!fs.existsSync(file)) return res.status(404).json({ error: 'task file missing' });
+      res.download(file, path.basename(file));
     } else {
       res.json(input.payload);
     }
@@ -211,6 +220,51 @@ export function createRouter(store, runner) {
     try {
       runner.completeTask(job, task, { status, result, error });
     } catch (err) {
+      return res.status(400).json({ error: String(err?.message || err) });
+    }
+    runner.tick().catch(() => {});
+    res.json({ ok: true });
+  });
+
+  // Burn-in result upload: the encoded segment is a file, too large for the
+  // JSON result endpoint. The worker posts multipart form-data with the file
+  // in field "file" plus text fields workerId / status.
+  router.post('/tasks/:id/result-file', async (req, res) => {
+    const found = findTask(req.params.id);
+    if (!found) return res.status(404).json({ error: 'task not found' });
+    const { job, task } = found;
+    if (task.type !== 'burnin') return res.status(400).json({ error: 'result-file is only for burn-in tasks' });
+    if (task.state !== 'assigned') return res.status(409).json({ error: 'task is not assigned' });
+    const ct = req.headers['content-type'] || '';
+    const m = /multipart\/form-data;\s*boundary=(?:"([^"]+)"|([^;]+))/.exec(ct);
+    if (!m) return res.status(400).json({ error: 'expected multipart/form-data' });
+    const boundary = (m[1] || m[2]).trim();
+    const resultsDir = store.jobPath(job.id, 'results');
+    fs.mkdirSync(resultsDir, { recursive: true });
+    const finalName = `burnin_${task.segmentIndex}.mp4`;
+    const tmpPath = path.join(resultsDir, finalName + '.tmp');
+    try {
+      const { fields, files } = await parseMultipart(req, boundary, (fieldname) => {
+        if (fieldname !== 'file') throw new Error('unexpected file field: ' + fieldname);
+        return tmpPath;
+      });
+      if (fields.workerId && task.workerId && fields.workerId !== task.workerId) {
+        fs.rmSync(tmpPath, { force: true });
+        return res.status(403).json({ error: 'task is assigned to another worker' });
+      }
+      if (fields.status && fields.status !== 'done') {
+        fs.rmSync(tmpPath, { force: true });
+        return res.status(400).json({ error: 'status must be done' });
+      }
+      const file = files.find((f) => f.fieldname === 'file');
+      if (!file || file.size === 0) {
+        fs.rmSync(tmpPath, { force: true });
+        return res.status(400).json({ error: 'missing burned segment file' });
+      }
+      fs.renameSync(tmpPath, path.join(resultsDir, finalName));
+      runner.completeTask(job, task, { status: 'done', result: { file: `results/${finalName}` } });
+    } catch (err) {
+      fs.rmSync(tmpPath, { force: true });
       return res.status(400).json({ error: String(err?.message || err) });
     }
     runner.tick().catch(() => {});

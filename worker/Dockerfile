@@ -8,7 +8,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY worker.py gemini.py srt_utils.py .
+COPY worker.py gemini.py srt_utils.py burnin.py .
 
 ENV MANAGER_URL=http://manager:9400 \
     WORKER_PORT=9500 \
