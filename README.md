@@ -1,4 +1,4 @@
-# LanTask
+# Lantern
 
 A LAN distributed task platform. The manager splits work into tasks and
 hands them out; workers on any machine on the LAN pull tasks, do the
@@ -137,12 +137,12 @@ MANAGER_URL=http://127.0.0.1:9400 WORKER_PORT=9500 .venv/bin/python worker.py
 On any machine on the same network (Docker):
 
 ```bash
-docker run -d --name lantask-worker -p 9500:9500 \
+docker run -d --name lantern-worker -p 9500:9500 \
   -e MANAGER_URL=http://<MANAGER_LAN_IP>:9400 \
   -e WORKER_PORT=9500 \
   -e WHISPER_MODEL=small \
   -v whisper-models:/models \
-  lantask-worker
+  lantern-worker
 ```
 
 Or natively: `MANAGER_URL=http://<MANAGER_LAN_IP>:9400 WORKER_PORT=9500 python worker.py`.

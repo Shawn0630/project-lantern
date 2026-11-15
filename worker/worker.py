@@ -1,4 +1,4 @@
-"""LanTask worker: polls the manager for tasks, runs faster-whisper
+"""Lantern worker: polls the manager for tasks, runs faster-whisper
 transcription and Gemini translation, and reports results.
 
 The worker never accepts inbound task assignments; it pulls work from the
@@ -35,7 +35,7 @@ from gemini import translate_lines
 import burnin
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("lantask-worker")
+log = logging.getLogger("lantern-worker")
 
 VERSION = "1.2.0"
 MANAGER_URL = os.environ.get("MANAGER_URL", "").rstrip("/")
@@ -47,7 +47,7 @@ DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "small")
 HEARTBEAT_INTERVAL = 15
 POLL_INTERVAL = 2
 
-app = FastAPI(title="LanTask Worker")
+app = FastAPI(title="Lantern Worker")
 _state = {"current_task": None, "model": None}
 
 

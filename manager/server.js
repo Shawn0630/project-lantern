@@ -1,4 +1,4 @@
-// LanTask manager: Express server + static UI + pipeline ticks.
+// Lantern manager: Express server + static UI + pipeline ticks.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,7 +53,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 const server = app.listen(PORT, () => {
-  console.log(`LanTask manager listening on :${PORT} (data: ${DATA_DIR})`);
+  console.log(`Lantern manager listening on :${PORT} (data: ${DATA_DIR})`);
 });
 
 const tickTimer = setInterval(() => runner.tick().catch((e) => console.error('tick error', e)), 2000);

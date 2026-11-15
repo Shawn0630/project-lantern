@@ -1,4 +1,4 @@
-// REST API for LanTask manager.
+// REST API for Lantern manager.
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';

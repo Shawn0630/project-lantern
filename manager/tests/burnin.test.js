@@ -101,7 +101,7 @@ test('checkConcatCompatible rejects an fps mismatch and a missing video stream',
 });
 
 test('createJob stores burnChunkMin with default 5 and validates it', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lantask-burn-test-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lantern-burn-test-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const store = new Store(dir);
   const runner = new Runner(store, { env: {} });

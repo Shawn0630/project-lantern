@@ -1,4 +1,4 @@
-// LanTask UI: Jobs / Workers / Job detail. Polls the manager API.
+// Lantern UI: Jobs / Workers / Job detail. Polls the manager API.
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 

@@ -6,7 +6,7 @@
 # Usage: inject-burnin-failure.sh <job-id>
 set -u
 JOB="$1"
-L=/home/hatch/workspace/lantask
+L=/home/hatch/workspace/project-lantern
 WORKER_PID=$(cat "$L/probe/worker-v11.pid")
 WORKER_ID=probe-worker-v11
 for i in $(seq 1 180); do

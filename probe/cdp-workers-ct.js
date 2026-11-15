@@ -1,9 +1,9 @@
-// CDP check: screenshot the LanTask Workers page and dump the rendered table text.
+// CDP check: screenshot the Lantern Workers page and dump the rendered table text.
 const fs = require('fs');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const CDP = 'http://127.0.0.1:9223';
 const URL = 'http://127.0.0.1:9401/#/workers';
-const OUT = '/home/hatch/workspace/lantask/probe/workers-ct.png';
+const OUT = '/home/hatch/workspace/project-lantern/probe/workers-ct.png';
 
 (async () => {
   // Open the tab directly at the local URL: navigating to loopback from

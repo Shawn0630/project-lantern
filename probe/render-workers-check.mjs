@@ -40,12 +40,12 @@ const sandbox = {
 };
 vm.createContext(sandbox);
 
-const src = fs.readFileSync('/home/hatch/workspace/lantask/manager/public/app.js', 'utf8');
+const src = fs.readFileSync('/home/hatch/workspace/project-lantern/manager/public/app.js', 'utf8');
 vm.runInContext(src, sandbox);
 // route() already fired loadWorkers(); wait for the fetch + render.
 await new Promise((r) => setTimeout(r, 1500));
 const tbody = elements.get('#workers-table tbody');
-console.log('HEADER:', fs.readFileSync('/home/hatch/workspace/lantask/manager/public/index.html', 'utf8')
+console.log('HEADER:', fs.readFileSync('/home/hatch/workspace/project-lantern/manager/public/index.html', 'utf8')
   .match(/<table id="workers-table">\s*<thead><tr>(.*?)<\/tr>/s)[1]
   .replace(/<\/?th>/g, ' | ').replace(/\s+/g, ' ').trim());
 console.log('ROWS HTML:\n' + tbody.innerHTML);

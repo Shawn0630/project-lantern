@@ -39,7 +39,7 @@ test('parses fields and a text file', async () => {
     { name: 'chunkMin', body: '10' },
     { name: 'video', filename: 'clip.mp4', contentType: 'video/mp4', body: 'FAKEVIDEO-DATA' },
   ]);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lantask-mp-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lantern-mp-'));
   const { fields, files } = await parseMultipart(fakeReq(body), boundary, (field, filename) => {
     const p = path.join(dir, filename);
     return p;
@@ -64,7 +64,7 @@ test('binary content containing boundary-like bytes survives', async () => {
   const body = multipartBody(boundary, [
     { name: 'video', filename: 'a.bin', contentType: 'application/octet-stream', body: bin },
   ]);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lantask-mp-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lantern-mp-'));
   const { files } = await parseMultipart(fakeReq(body, 5), boundary, (field, filename) => path.join(dir, filename));
   assert.equal(files.length, 1);
   assert.deepEqual(fs.readFileSync(files[0].path), bin);
@@ -75,7 +75,7 @@ test('truncated body rejects', async () => {
   const boundary = '----testboundary1234';
   const full = multipartBody(boundary, [{ name: 'video', filename: 'a.bin', body: 'data' }]);
   const cut = full.subarray(0, full.length - 10);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lantask-mp-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lantern-mp-'));
   await assert.rejects(
     parseMultipart(fakeReq(cut), boundary, (field, filename) => path.join(dir, filename)),
     /truncated/,

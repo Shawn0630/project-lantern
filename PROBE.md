@@ -1,4 +1,4 @@
-# LanTask v1 — End-to-End Probe (2026-11-14)
+# Lantern v1 — End-to-End Probe (2026-11-14)
 
 Probe run on this VM (Linux, no Docker). Everything below was run natively;
 Docker images were **not** built here (no docker/podman on this VM) — the
@@ -29,13 +29,13 @@ python3 probe/stub_gemini.py 8077
 # 2. Manager (server/.env holds a dummy key so the translate stage enables;
 #    the value is never sent anywhere in this probe)
 printf 'LLM_API_KEY=probe-stub-key\nLLM_MODEL=gemini-2.5-flash\n' > server/.env
-cd manager && PORT=9400 DATA_DIR=/home/hatch/workspace/lantask/data node server.js
+cd manager && PORT=9400 DATA_DIR=/home/hatch/workspace/project-lantern/data node server.js
 
 # 3. Worker (tiny model; HF cache seeded, see "Issues found" below)
 cd worker
 MANAGER_URL=http://127.0.0.1:9400 WORKER_PORT=9500 WORKER_NAME=probe-worker \
   WHISPER_MODEL=tiny GEMINI_BASE_URL=http://127.0.0.1:8077/v1beta \
-  HF_HOME=/home/hatch/workspace/lantask/probe/hf-cache .venv/bin/python worker.py
+  HF_HOME=/home/hatch/workspace/project-lantern/probe/hf-cache .venv/bin/python worker.py
 
 # 4. Submit a job: 30 s chunks, 5 s overlap, translate + burn-in on
 curl -X POST http://127.0.0.1:9400/api/jobs \
@@ -136,7 +136,7 @@ curl -s http://127.0.0.1:9400/api/jobs/job_mwgpsol9nkoqwd
 
 ---
 
-# LanTask v1.1 — Distributed segmented burn-in probe (2026-11-14)
+# Lantern v1.1 — Distributed segmented burn-in probe (2026-11-14)
 
 Same setup as v1 (67.2 s test video, real speech, faster-whisper `tiny`,
 stubbed Gemini on port 8077, single probe worker), but burn-in now runs
@@ -149,10 +149,10 @@ injector is `probe/inject-burnin-failure.sh`.
 ```bash
 # 1. Stub Gemini + manager (fresh data dir) + worker, as in v1
 python3 probe/stub_gemini.py 8077
-PORT=9400 DATA_DIR=/home/hatch/workspace/lantask/probe/data-v11 node manager/server.js
+PORT=9400 DATA_DIR=/home/hatch/workspace/project-lantern/probe/data-v11 node manager/server.js
 MANAGER_URL=http://127.0.0.1:9400 WORKER_PORT=9500 WORKER_ID=probe-worker-v11 \
   WHISPER_MODEL=tiny GEMINI_BASE_URL=http://127.0.0.1:8077/v1beta \
-  HF_HOME=/home/hatch/workspace/lantask/probe/hf-cache worker/.venv/bin/python worker/worker.py
+  HF_HOME=/home/hatch/workspace/project-lantern/probe/hf-cache worker/.venv/bin/python worker/worker.py
 
 # 2. Submit with small burn segments (0.5 min -> 3 burnin tasks)
 curl -X POST http://127.0.0.1:9400/api/jobs \
