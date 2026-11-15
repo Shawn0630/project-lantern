@@ -162,7 +162,7 @@ export class Runner {
     const config = {
       sourceLang: fields.sourceLang || 'auto',
       targetLang: fields.targetLang || 'zh-CN',
-      model: fields.model || 'small',
+      model: fields.model || 'large-v3',
       chunkMin: Number(fields.chunkMin || 10),
       overlapSec: Number(fields.overlapSec ?? 10),
       burnChunkMin: Number(fields.burnChunkMin || 5),

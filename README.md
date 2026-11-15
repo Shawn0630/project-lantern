@@ -147,8 +147,8 @@ MANAGER_URL=http://<MANAGER_LAN_IP>:9400 docker compose -f docker-compose.worker
 find the Mac's IP in System Settings → Wi-Fi). It is required: the command
 fails loudly if it is unset. Or put `MANAGER_URL=http://<MANAGER_LAN_IP>:9400`
 in a `.env` file next to the compose file and run the command without the
-inline variable. `WHISPER_MODEL` defaults to `small` (`tiny` for tests,
-`large-v3` for quality). No port is published: the manager never dials the
+inline variable. `WHISPER_MODEL` defaults to `large-v3` (`large-v3-turbo` for speed,
+`tiny` for tests). No port is published: the manager never dials the
 worker (worker-pull only). The `worker-data` volume holds the worker's
 stable id, so a redeploy reuses the same Workers row instead of
 registering a new one.
@@ -160,7 +160,7 @@ docker build -t lantern-worker ./worker
 docker run -d --name lantern-worker \
   -e MANAGER_URL=http://<MANAGER_LAN_IP>:9400 \
   -e WORKER_PORT=9500 \
-  -e WHISPER_MODEL=small \
+  -e WHISPER_MODEL=large-v3 \
   -e WORKER_DATA_DIR=/data \
   -v whisper-models:/models \
   -v lantern-worker-data:/data \
@@ -180,7 +180,7 @@ Workers page, which shows each worker's status, current task
 | --- | --- | --- |
 | Source language | auto | Whisper auto-detect |
 | Target language | zh-CN | |
-| Whisper model | small | tiny for tests; large-v3 for quality |
+| Whisper model | large-v3 | large-v3-turbo for speed; tiny for tests |
 | Chunk minutes | 10 | 0.5–120 |
 | Overlap seconds | 10 | must be < chunk length |
 | Burn chunk minutes | 5 | 0.5–120; boundaries snap to subtitle gaps |

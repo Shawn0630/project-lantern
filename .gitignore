@@ -17,3 +17,8 @@ probe/*.id
 probe/data-v11/
 probe/data-v12/
 probe/data-ct/
+probe/data-dedupe/
+probe/data-dedupe-w1/
+probe/data-dedupe-w2/
+probe/data-ui/
+probe/*.png

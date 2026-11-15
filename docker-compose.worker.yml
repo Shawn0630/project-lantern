@@ -11,8 +11,8 @@
 # Wi-Fi. The command fails loudly if it is unset. Or put
 # `MANAGER_URL=http://<Mac LAN IP>:9400` in a `.env` file next to this
 # file and run the command without the inline variable.
-# WHISPER_MODEL defaults to small; use tiny for tests or large-v3 for
-# quality: WHISPER_MODEL=large-v3 docker compose -f docker-compose.worker.yml up -d --build
+# WHISPER_MODEL defaults to large-v3; use large-v3-turbo for speed or tiny
+# for tests: WHISPER_MODEL=large-v3-turbo docker compose -f docker-compose.worker.yml up -d --build
 #
 # Notes:
 # - No port is published: the manager never dials the worker (worker-pull
@@ -30,7 +30,7 @@ services:
     environment:
       MANAGER_URL: ${MANAGER_URL:?set MANAGER_URL to http://<Mac LAN IP>:9400}
       WORKER_PORT: "9500"
-      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      WHISPER_MODEL: ${WHISPER_MODEL:-large-v3}
       # Stable worker id lives in /data (worker-data volume).
       WORKER_DATA_DIR: /data
     volumes:

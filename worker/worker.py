@@ -18,7 +18,7 @@ Environment:
                 (default ~/.lantern; in Docker set to /data, backed by
                 the worker-data volume, so a container recreate keeps
                 the same id and the manager shows one row per machine)
-  WHISPER_MODEL default faster-whisper model (default small)
+  WHISPER_MODEL default faster-whisper model (default large-v3)
   HF_HOME       Hugging Face cache dir for downloaded models
 
 Identity: the worker id is stable per machine, not per container.
@@ -91,7 +91,7 @@ WORKER_ID = resolve_worker_id()
 # Fresh per process start (never persisted): lets the manager tell a
 # worker restart apart from the same process still running.
 BOOT_ID = uuid.uuid4().hex
-DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "small")
+DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "large-v3")
 HEARTBEAT_INTERVAL = 15
 POLL_INTERVAL = 2
 

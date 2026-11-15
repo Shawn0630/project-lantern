@@ -44,13 +44,14 @@ export const JOB_TYPES = [
         ],
       },
       {
-        key: 'model', label: 'Whisper model', kind: 'select', default: 'small',
+        key: 'model', label: 'Whisper model', kind: 'select', default: 'large-v3',
         options: [
           { value: 'tiny', label: 'tiny' },
           { value: 'base', label: 'base' },
           { value: 'small', label: 'small' },
           { value: 'medium', label: 'medium' },
           { value: 'large-v3', label: 'large-v3' },
+          { value: 'large-v3-turbo', label: 'large-v3-turbo' },
         ],
       },
       { key: 'chunkMin', label: 'Chunk minutes', kind: 'number', default: 10, min: 0.5, max: 120, step: 0.5 },
