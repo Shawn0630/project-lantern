@@ -141,7 +141,12 @@ def test_translate_lines_requires_key():
 
 
 # ---- scheduler v1.2: capabilities, stats, claim ack ----
+import os  # noqa: E402
 import shutil  # noqa: E402
+
+# The worker resolves its stable id at import time; pin it in tests so
+# importing the module never writes to the real ~/.lantern.
+os.environ.setdefault("WORKER_ID", "test-worker")
 
 import worker as worker_mod  # noqa: E402
 
@@ -223,3 +228,44 @@ def test_heartbeat_reports_capabilities_and_stats(monkeypatch):
     assert set(payload["stats"]) == {"loadAvg1", "cpuPercent", "memUsedMb", "memTotalMb"}
     assert payload["load"] in (0, 1)
     assert payload["version"] == worker_mod.VERSION
+
+
+# ---- stable worker identity (dedupe across deploys) ----
+def test_resolve_worker_id_prefers_explicit_env(monkeypatch):
+    monkeypatch.setenv("WORKER_ID", "explicit-id")
+    assert worker_mod.resolve_worker_id() == "explicit-id"
+
+
+def test_resolve_worker_id_persists_in_data_dir(monkeypatch, tmp_path):
+    monkeypatch.delenv("WORKER_ID", raising=False)
+    monkeypatch.setenv("WORKER_DATA_DIR", str(tmp_path))
+    first = worker_mod.resolve_worker_id()
+    assert first
+    assert (tmp_path / "worker-id").read_text().strip() == first
+    assert worker_mod.resolve_worker_id() == first
+
+
+def test_resolve_worker_id_regenerates_on_empty_file(monkeypatch, tmp_path):
+    monkeypatch.delenv("WORKER_ID", raising=False)
+    monkeypatch.setenv("WORKER_DATA_DIR", str(tmp_path))
+    (tmp_path / "worker-id").write_text("\n")
+    first = worker_mod.resolve_worker_id()
+    assert first
+    assert worker_mod.resolve_worker_id() == first
+
+
+def test_heartbeat_sends_stable_id_and_boot_id(monkeypatch):
+    posted = []
+
+    def fake_post(path, payload, timeout=30):
+        posted.append(payload)
+        return FakeResponse(200, {"id": "x", "registered": False})
+
+    monkeypatch.setattr(worker_mod, "manager_post", fake_post)
+    worker_mod.heartbeat()
+    worker_mod.heartbeat()
+    assert len(posted) == 2
+    for payload in posted:
+        assert payload["id"] == worker_mod.WORKER_ID
+        assert payload["bootId"] == worker_mod.BOOT_ID
+    assert posted[0]["bootId"] == posted[1]["bootId"]

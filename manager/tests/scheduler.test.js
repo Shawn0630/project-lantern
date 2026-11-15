@@ -247,6 +247,33 @@ test('verifyAssignedWorkers re-queues tasks of silent workers and marks them off
   assert.equal(live.status, 'online');
 });
 
+test('requeueWorkerTasks re-offers only that worker\'s assigned tasks', () => {
+  const tMine = makeTask('t1', 'transcribe', 'assigned', {
+    workerId: 'w1', assignedAt: iso(NOW - 5000), ack: true, attempts: 1,
+  });
+  const tOther = makeTask('t2', 'transcribe', 'assigned', {
+    workerId: 'w2', assignedAt: iso(NOW - 5000), ack: true, attempts: 1,
+  });
+  const tQueued = makeTask('t3', 'transcribe', 'queued', { workerId: null });
+  const job = makeJob('j1', 'transcribing', [tMine, tOther, tQueued]);
+  const r = runner([job], [makeWorker('w1'), makeWorker('w2')]);
+  assert.equal(r.requeueWorkerTasks('w1', 'worker restarted'), 1);
+  assert.equal(tMine.state, 'queued');
+  assert.equal(tMine.excludeWorker, 'w1');
+  assert.equal(tOther.state, 'assigned');
+  assert.equal(tQueued.state, 'queued');
+});
+
+test('requeueWorkerTasks fails a task whose retry budget is spent', () => {
+  const spent = makeTask('t1', 'transcribe', 'assigned', {
+    workerId: 'w1', assignedAt: iso(NOW - 5000), ack: true, attempts: 2,
+  });
+  const job = makeJob('j1', 'transcribing', [spent]);
+  const r = runner([job], [makeWorker('w1')]);
+  assert.equal(r.requeueWorkerTasks('w1'), 1);
+  assert.equal(spent.state, 'failed');
+});
+
 test('reconcileOnBoot sweeps stale assignments immediately', () => {
   const stale = makeTask('t1', 'transcribe', 'assigned', {
     workerId: 'w1', assignedAt: iso(NOW - 20 * 60 * 1000), ack: true, attempts: 1,

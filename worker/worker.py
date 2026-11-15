@@ -11,11 +11,27 @@ long task does not make the worker look dead.
 Environment:
   MANAGER_URL   manager base URL, e.g. http://192.168.1.5:9400 (required)
   WORKER_PORT   local health-API port (default 9500)
-  WORKER_ID     stable id (default: hostname-port)
+  WORKER_ID     stable id (default: persisted id, see below)
   WORKER_NAME   display name (default: hostname)
   WORKER_HOST   host reported to the manager (default: hostname)
+  WORKER_DATA_DIR directory holding the persisted worker id
+                (default ~/.lantern; in Docker set to /data, backed by
+                the worker-data volume, so a container recreate keeps
+                the same id and the manager shows one row per machine)
   WHISPER_MODEL default faster-whisper model (default small)
   HF_HOME       Hugging Face cache dir for downloaded models
+
+Identity: the worker id is stable per machine, not per container.
+On first boot it is generated and stored in
+``$WORKER_DATA_DIR/worker-id``; later boots reuse it, so a redeploy
+(container recreate with a new hostname) heartbeats as the same
+worker and the manager updates the existing row instead of adding
+a new one. WORKER_ID overrides the file when explicitly set.
+NOTE: two worker containers sharing one WORKER_DATA_DIR would share
+one id and fight over it — give each worker its own volume.
+BOOT_ID is a fresh random id per process start, sent with every
+heartbeat so the manager can tell a restart (new incarnation, same
+stable id) from the same process still running.
 """
 import logging
 import os
@@ -25,6 +41,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import requests
@@ -42,7 +59,38 @@ MANAGER_URL = os.environ.get("MANAGER_URL", "").rstrip("/")
 WORKER_PORT = int(os.environ.get("WORKER_PORT", "9500"))
 WORKER_HOST = os.environ.get("WORKER_HOST", socket.gethostname())
 WORKER_NAME = os.environ.get("WORKER_NAME", socket.gethostname())
-WORKER_ID = os.environ.get("WORKER_ID", f"{WORKER_HOST}-{WORKER_PORT}")
+
+
+def resolve_worker_id():
+    """Stable id for this machine. WORKER_ID wins when set; otherwise
+    generate once and persist it in $WORKER_DATA_DIR/worker-id so the
+    id survives container recreates (the data dir is a volume)."""
+    if os.environ.get("WORKER_ID"):
+        return os.environ["WORKER_ID"]
+    data_dir = Path(os.environ.get("WORKER_DATA_DIR") or (Path.home() / ".lantern"))
+    id_file = data_dir / "worker-id"
+    try:
+        existing = id_file.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+    except OSError:
+        pass
+    new_id = uuid.uuid4().hex
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        tmp = data_dir / "worker-id.tmp"
+        tmp.write_text(new_id + "\n", encoding="utf-8")
+        os.replace(tmp, id_file)
+    except OSError:
+        log.warning("could not persist worker id in %s; using an ephemeral id", data_dir)
+        return new_id
+    return new_id
+
+
+WORKER_ID = resolve_worker_id()
+# Fresh per process start (never persisted): lets the manager tell a
+# worker restart apart from the same process still running.
+BOOT_ID = uuid.uuid4().hex
 DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "small")
 HEARTBEAT_INTERVAL = 15
 POLL_INTERVAL = 2
@@ -169,6 +217,7 @@ def heartbeat():
     try:
         resp = manager_post("/api/workers/heartbeat", {
             "id": WORKER_ID,
+            "bootId": BOOT_ID,
             "host": WORKER_HOST,
             "port": WORKER_PORT,
             "name": WORKER_NAME,

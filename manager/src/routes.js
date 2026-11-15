@@ -166,15 +166,21 @@ export function createRouter(store, runner) {
   });
 
   router.post('/workers/heartbeat', (req, res) => {
-    const { id, host, port, name, load, model, version, capabilities, ffmpeg, stats } = req.body || {};
+    const { id, bootId, host, port, name, load, model, version, capabilities, ffmpeg, stats } = req.body || {};
     if (!host || !port) return res.status(400).json({ error: 'host and port are required' });
     const workers = store.listWorkers();
-    let worker = (id && workers.find((w) => w.id === id)) ||
+    // Match on the worker-reported stable id first: the same machine
+    // heartbeats under a new container hostname after every redeploy,
+    // so matching on host:port alone would register a duplicate row.
+    // The host:port fallback keeps pre-registered rows (POST /workers)
+    // and legacy workers that report no stable id merging correctly.
+    let worker = (id && workers.find((w) => w.workerId === id || w.id === id)) ||
       workers.find((w) => w.host === host && Number(w.port) === Number(port));
     if (!worker) {
       worker = {
         id: newId('worker'),
         workerId: id || null,
+        bootId: bootId || null,
         name: name || `${host}:${port}`,
         host,
         port: Number(port),
@@ -191,8 +197,16 @@ export function createRouter(store, runner) {
       };
       workers.push(worker);
     } else {
+      // A different bootId under the same stable id means the previous
+      // incarnation died (e.g. container recreated on deploy) while the
+      // row stays online: re-offer its in-flight tasks now instead of
+      // waiting for the 15-minute stale sweep.
+      const restarted = Boolean(bootId && worker.bootId && worker.bootId !== bootId);
       worker.status = 'online';
       worker.lastSeen = new Date().toISOString();
+      worker.host = host;
+      worker.port = Number(port);
+      if (bootId) worker.bootId = bootId;
       if (id && !worker.workerId) worker.workerId = id;
       if (load !== undefined) worker.load = load;
       if (model) worker.model = model;
@@ -201,6 +215,9 @@ export function createRouter(store, runner) {
       if (Array.isArray(capabilities)) worker.capabilities = capabilities;
       if (ffmpeg !== undefined) worker.ffmpeg = ffmpeg;
       if (stats !== undefined) worker.stats = stats;
+      if (restarted && typeof runner.requeueWorkerTasks === 'function') {
+        runner.requeueWorkerTasks(worker.workerId || id, 'worker restarted');
+      }
     }
     store.saveWorkers(workers);
     res.json({ id: worker.id, registered: worker.registered });

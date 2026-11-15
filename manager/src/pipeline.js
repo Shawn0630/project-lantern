@@ -627,6 +627,30 @@ export class Runner {
     return requeued;
   }
 
+  /** Re-queue the in-flight tasks of one worker. Used when a worker
+   * restarts under the same stable id (new bootId): the old
+   * incarnation is dead even though the worker row stays online —
+   * the new incarnation keeps heartbeating — so waiting for the
+   * 15-minute sweepStale backstop would strand its work. The
+   * re-queued task excludes the worker for the usual grace period,
+   * exactly like a 'worker silent' re-queue. */
+  requeueWorkerTasks(workerId, reason = 'worker restarted') {
+    let requeued = 0;
+    for (const job of this.store.listJobs()) {
+      if (!ACTIVE_STAGES.has(job.stage)) continue;
+      let changed = false;
+      for (const task of job.tasks) {
+        if (task.state !== 'assigned' || task.workerId !== workerId) continue;
+        task.error = reason;
+        this.requeueTask(job, task, reason);
+        changed = true;
+        requeued += 1;
+      }
+      if (changed) this.store.saveJob(job);
+    }
+    return requeued;
+  }
+
   /** Re-queue tasks assigned to workers that stopped heartbeating, and
    * mark those workers offline. A live worker heartbeats every 15 s even
    * while a task is running, so a silent worker is presumed dead.
