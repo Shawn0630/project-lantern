@@ -4,6 +4,7 @@ import path from 'node:path';
 import express from 'express';
 import { parseMultipart } from './multipart.js';
 import { newId } from './store.js';
+import { getJobType, listJobTypes } from './jobTypes.js';
 
 const DOWNLOADABLE = {
   'source.srt': (job) => job.outputs.sourceSrt,
@@ -44,11 +45,16 @@ export function createRouter(store, runner) {
 
   router.get('/health', (req, res) => res.json({ ok: true, version: '1.2.0' }));
 
+  // Job-type registry: the UI renders the "new job" form from this
+  // schema, so a new type is a registry entry, not a UI change.
+  router.get('/job-types', (req, res) => res.json(listJobTypes()));
+
   // ---- jobs ----
   router.get('/jobs', (req, res) => {
     const jobs = store.listJobs().map((j) => ({
       id: j.id,
       name: j.name,
+      jobType: j.jobType || 'video-translation',
       createdAt: j.createdAt,
       stage: j.stage,
       duration: j.duration,
@@ -74,9 +80,22 @@ export function createRouter(store, runner) {
         const tmp = path.join(uploadDir, `${newId('up')}_${filename}`);
         return tmp;
       });
-      const video = files.find((f) => f.fieldname === 'video');
-      if (!video) return res.status(400).json({ error: 'missing video file (field "video")' });
+      // Job type is optional for backward compatibility: an upload with
+      // no jobType is a video-translation job, as before.
+      const jobType = fields.jobType || 'video-translation';
+      const type = getJobType(jobType);
+      if (!type) return res.status(400).json({ error: `unknown job type: ${jobType}` });
+      for (const field of type.fields) {
+        if (field.kind === 'file' && field.required && !files.find((f) => f.fieldname === field.key)) {
+          return res.status(400).json({ error: `missing ${field.label.toLowerCase()} file (field "${field.key}")` });
+        }
+      }
+      const fileField = type.fields.find((f) => f.kind === 'file');
+      const video = fileField && files.find((f) => f.fieldname === fileField.key);
+      if (!video) return res.status(400).json({ error: `missing ${fileField.label.toLowerCase()} file (field "${fileField.key}")` });
       const job = runner.createJob(fields, { path: video.path, originalName: video.filename || 'video.mp4' });
+      job.jobType = jobType;
+      if (store.saveJob) store.saveJob(job);
       runner.tick().catch(() => {});
       res.status(201).json({ id: job.id });
     } catch (err) {

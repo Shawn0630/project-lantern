@@ -18,67 +18,35 @@
 <main>
   <section id="view-jobs">
     <h2>Jobs</h2>
-    <form id="upload-form">
-      <label>Video <input type="file" name="video" accept="video/*,audio/*" required></label>
-      <label>Source language
-        <select name="sourceLang">
-          <option value="auto" selected>Auto</option>
-          <option value="en">English</option>
-          <option value="zh">Chinese</option>
-          <option value="ja">Japanese</option>
-          <option value="ko">Korean</option>
-          <option value="es">Spanish</option>
-          <option value="fr">French</option>
-          <option value="de">German</option>
-        </select>
-      </label>
-      <label>Target language
-        <select name="targetLang">
-          <option value="zh-CN" selected>Chinese (Simplified)</option>
-          <option value="en">English</option>
-          <option value="ja">Japanese</option>
-          <option value="ko">Korean</option>
-          <option value="es">Spanish</option>
-          <option value="fr">French</option>
-          <option value="de">German</option>
-        </select>
-      </label>
-      <label>Whisper model
-        <select name="model">
-          <option value="tiny">tiny</option>
-          <option value="base">base</option>
-          <option value="small" selected>small</option>
-          <option value="medium">medium</option>
-          <option value="large-v3">large-v3</option>
-        </select>
-      </label>
-      <label>Chunk minutes <input type="number" name="chunkMin" value="10" min="0.5" max="120" step="0.5"></label>
-      <label>Overlap seconds <input type="number" name="overlapSec" value="10" min="0" max="120" step="1"></label>
-      <label>Burn chunk minutes <input type="number" name="burnChunkMin" value="5" min="0.5" max="120" step="0.5"></label>
-      <label><input type="checkbox" name="translate" checked> Translate</label>
-      <label><input type="checkbox" name="burnIn" checked> Burn-in subtitles</label>
-      <label><input type="checkbox" name="bilingual"> Bilingual subtitles</label>
-      <button type="submit">Upload</button>
-      <span id="upload-status"></span>
-    </form>
-    <table id="jobs-table">
-      <thead><tr><th>Job</th><th>Stage</th><th>Progress</th><th>Duration</th><th>Created</th><th></th></tr></thead>
-      <tbody></tbody>
-    </table>
+    <div class="card">
+      <h3>New job</h3>
+      <div id="job-type-picker" class="type-picker"></div>
+      <form id="upload-form" hidden></form>
+    </div>
+    <div class="card table-card">
+      <table id="jobs-table">
+        <thead><tr><th>Job</th><th>Stage</th><th>Progress</th><th>Duration</th><th>Created</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
   </section>
 
   <section id="view-workers" hidden>
     <h2>Workers</h2>
-    <form id="worker-form">
-      <label>Host <input type="text" name="host" placeholder="192.168.1.10" required></label>
-      <label>Port <input type="number" name="port" value="9500" min="1" max="65535" required></label>
-      <label>Name <input type="text" name="name" placeholder="worker-1"></label>
-      <button type="submit">Add worker</button>
-    </form>
-    <table id="workers-table">
-      <thead><tr><th>Name</th><th>Host</th><th>Status</th><th>Last seen</th><th>Load</th><th>Current task</th><th>Model</th><th>Capabilities</th><th>Resources</th><th></th></tr></thead>
-      <tbody></tbody>
-    </table>
+    <div class="card">
+      <form id="worker-form">
+        <label>Host <input type="text" name="host" placeholder="192.168.1.10" required></label>
+        <label>Port <input type="number" name="port" value="9500" min="1" max="65535" required></label>
+        <label>Name <input type="text" name="name" placeholder="worker-1"></label>
+        <button type="submit">Add worker</button>
+      </form>
+    </div>
+    <div class="card table-card">
+      <table id="workers-table">
+        <thead><tr><th>Name</th><th>Host</th><th>Status</th><th>Last seen</th><th>Load</th><th>Current task</th><th>Model</th><th>Capabilities</th><th>Resources</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
   </section>
 
   <section id="view-job" hidden>

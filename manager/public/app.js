@@ -46,20 +46,121 @@ async function refreshHealth() {
   }
 }
 
+// ---- new job: pick a type first, then render that type's form ----
+// The form is built from the GET /api/job-types schema, so a new job
+// type needs no UI change — only a registry entry server-side.
+let jobTypes = [];
+let selectedJobType = null;
+
+async function loadJobTypes() {
+  try {
+    jobTypes = await api('/api/job-types');
+  } catch {
+    jobTypes = [];
+  }
+  renderTypePicker();
+  if (!selectedJobType && jobTypes.length) selectJobType(jobTypes[0].id);
+}
+
+function renderTypePicker() {
+  $('#job-type-picker').innerHTML = jobTypes.map((t) => `<button type="button"
+    class="type-card${selectedJobType && t.id === selectedJobType.id ? ' selected' : ''}"
+    data-type="${esc(t.id)}">${esc(t.name)}</button>`).join('')
+    || '<div class="empty-state">No job types available</div>';
+}
+
+function fieldHtml(f) {
+  if (f.kind === 'file') {
+    return `<label class="field field-file"><span class="field-label">${esc(f.label)}</span>
+      <span class="dropzone" data-dropzone="${esc(f.key)}">
+        <span class="dropzone-text">Drop file here or choose</span>
+        <span class="dropzone-file" hidden></span>
+        <input type="file" name="${esc(f.key)}" accept="${esc(f.accept || '')}"${f.required ? ' required' : ''} hidden>
+      </span></label>`;
+  }
+  if (f.kind === 'select') {
+    return `<label class="field"><span class="field-label">${esc(f.label)}</span>
+      <select name="${esc(f.key)}">${(f.options || []).map((o) =>
+        `<option value="${esc(o.value)}"${o.value === f.default ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}</select></label>`;
+  }
+  if (f.kind === 'number') {
+    return `<label class="field"><span class="field-label">${esc(f.label)}</span>
+      <input type="number" name="${esc(f.key)}" value="${esc(f.default ?? '')}"${f.min != null ? ` min="${esc(f.min)}"` : ''}${f.max != null ? ` max="${esc(f.max)}"` : ''}${f.step != null ? ` step="${esc(f.step)}"` : ''}></label>`;
+  }
+  if (f.kind === 'checkbox') {
+    return `<label class="field field-toggle"><span class="switch"><input type="checkbox" name="${esc(f.key)}"${f.default ? ' checked' : ''}><span class="switch-slider"></span></span><span class="field-label">${esc(f.label)}</span></label>`;
+  }
+  return '';
+}
+
+function renderJobForm(type) {
+  const form = $('#upload-form');
+  const fields = type.fields.filter((f) => f.kind !== 'checkbox');
+  const toggles = type.fields.filter((f) => f.kind === 'checkbox');
+  form.innerHTML = `<div class="form-grid">${fields.map(fieldHtml).join('')}</div>`
+    + (toggles.length ? `<div class="toggles">${toggles.map(fieldHtml).join('')}</div>` : '')
+    + `<div class="form-actions"><button type="submit" class="btn-primary">Upload</button><span id="upload-status"></span></div>`;
+  form.hidden = false;
+  wireDropzones(form);
+}
+
+function wireDropzones(form) {
+  form.querySelectorAll('[data-dropzone]').forEach((zone) => {
+    const input = zone.querySelector('input[type="file"]');
+    const showFile = () => {
+      const name = input.files && input.files[0] ? input.files[0].name : '';
+      zone.querySelector('.dropzone-text').hidden = !!name;
+      const fileEl = zone.querySelector('.dropzone-file');
+      fileEl.hidden = !name;
+      fileEl.textContent = name;
+    };
+    zone.addEventListener('click', () => input.click());
+    input.addEventListener('change', showFile);
+    zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+    zone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      zone.classList.remove('dragover');
+      if (e.dataTransfer && e.dataTransfer.files.length) {
+        input.files = e.dataTransfer.files;
+        showFile();
+      }
+    });
+  });
+}
+
+function selectJobType(id) {
+  const type = jobTypes.find((t) => t.id === id);
+  if (!type) return;
+  selectedJobType = type;
+  renderTypePicker();
+  renderJobForm(type);
+}
+
+$('#job-type-picker').addEventListener('click', (e) => {
+  const card = e.target.closest('[data-type]');
+  if (card) selectJobType(card.dataset.type);
+});
+
+function stagePill(stage) {
+  const cls = stage === 'done' ? 'ok' : stage === 'failed' ? 'bad' : 'run';
+  return `<span class="pill ${cls}">${esc(stage)}</span>`;
+}
+
 async function loadJobs() {
   const jobs = await api('/api/jobs');
   const tbody = $('#jobs-table tbody');
   tbody.innerHTML = jobs.map((j) => {
     const pct = j.tasksTotal ? Math.round((100 * j.tasksDone) / j.tasksTotal) : (j.stage === 'done' ? 100 : 0);
     return `<tr>
-      <td>${esc(j.name)}<br><small>${esc(j.id)}</small></td>
-      <td>${esc(j.stage)}${j.error ? `<br><small>${esc(j.error)}</small>` : ''}</td>
-      <td>${j.tasksDone}/${j.tasksTotal} (${pct}%)</td>
+      <td><span class="job-name">${esc(j.name)}</span><br><small>${esc(j.id)}</small></td>
+      <td>${stagePill(j.stage)}${j.error ? `<br><small class="err">${esc(j.error)}</small>` : ''}</td>
+      <td><span class="progress"><span class="progress-fill" style="width:${pct}%"></span></span> ${j.tasksDone}/${j.tasksTotal} (${pct}%)</td>
       <td>${fmtTime(j.duration)}</td>
       <td>${fmtAgo(j.createdAt)}</td>
       <td><a href="#/jobs/${esc(j.id)}">Open</a></td>
     </tr>`;
-  }).join('') || '<tr><td colspan="6">No jobs yet</td></tr>';
+  }).join('') || '<tr><td colspan="6"><div class="empty-state">No jobs yet</div></td></tr>';
 }
 
 function fmtStats(stats) {
@@ -101,6 +202,7 @@ async function loadJobDetail(id) {
   const job = await api(`/api/jobs/${encodeURIComponent(id)}`);
   $('#job-title').textContent = `${job.name} — ${job.stage}`;
   const meta = [
+    ['Type', job.jobType || 'video-translation'],
     ['ID', job.id],
     ['Created', new Date(job.createdAt).toLocaleString()],
     ['Duration', fmtTime(job.duration)],
@@ -162,6 +264,7 @@ function route() {
     currentView = 'jobs';
     $('[data-nav="jobs"]').classList.add('active');
     $('#view-jobs').hidden = false;
+    loadJobTypes().catch(() => {});
     loadJobs().catch(() => {});
     pollTimer = setInterval(() => loadJobs().catch(() => {}), 2000);
   }
@@ -174,14 +277,17 @@ $('#upload-form').addEventListener('submit', async (e) => {
   status.textContent = 'Uploading…';
   try {
     const fd = new FormData(e.target);
-    fd.set('translate', e.target.translate.checked ? 'true' : 'false');
-    fd.set('burnIn', e.target.burnIn.checked ? 'true' : 'false');
-    fd.set('bilingual', e.target.bilingual.checked ? 'true' : 'false');
+    if (selectedJobType) {
+      fd.set('jobType', selectedJobType.id);
+      for (const f of selectedJobType.fields) {
+        if (f.kind === 'checkbox') fd.set(f.key, e.target.elements[f.key].checked ? 'true' : 'false');
+      }
+    }
     const res = await fetch('/api/jobs', { method: 'POST', body: fd });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
     status.textContent = 'Uploaded: ' + body.id;
-    e.target.reset();
+    if (selectedJobType) renderJobForm(selectedJobType);
     loadJobs();
   } catch (err) {
     status.textContent = 'Upload failed: ' + err.message;
