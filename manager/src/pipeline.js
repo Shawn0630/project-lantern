@@ -112,6 +112,37 @@ export class Runner {
     return worker.capabilities.includes(type);
   }
 
+  /** Whisper model a worker is pinned to (manager-set via the Workers
+   * page), or null when unpinned. An unpinned worker takes any job's
+   * model; a pinned one only takes tasks whose job asks for its model. */
+  workerModelPin(worker) {
+    return worker?.modelPin || null;
+  }
+
+  /** LLM credentials for a claiming worker: a per-worker override wins
+   * per field, everything else falls back to the global server/.env
+   * config. An unknown worker (null) resolves to the global config,
+   * exactly as before. */
+  workerLlm(worker) {
+    const override = worker?.llm || null;
+    const apiKey = override?.apiKey || this.llm.apiKey;
+    const model = override?.model || this.llm.model;
+    return { apiKey, model, configured: Boolean(apiKey) };
+  }
+
+  /** True when any registered worker carries its own LLM key. */
+  anyWorkerHasLlmKey() {
+    const workers = typeof this.store.listWorkers === 'function' ? this.store.listWorkers() : [];
+    return workers.some((w) => Boolean(w.llm?.apiKey));
+  }
+
+  /** Translation can run when a key exists somewhere: the global
+   * server/.env key, or any worker's own override key (only workers
+   * that resolve a key are offered translate tasks — see claimTask). */
+  translationEnabled() {
+    return this.llm.configured || this.anyWorkerHasLlmKey();
+  }
+
   /** A job counts as started once any of its tasks is done or assigned. */
   jobStarted(job) {
     return job.tasks.some((t) => t.state === 'done' || t.state === 'assigned');
@@ -313,8 +344,11 @@ export class Runner {
     fs.writeFileSync(this.store.jobPath(job.id, 'source.srt'), toSrt(segments));
     job.outputs.sourceSrt = 'source.srt';
     if (job.config.translate) {
-      if (!this.llm.configured) {
-        this.log(job, 'Translation skipped: LLM_API_KEY is not configured');
+      // Translation needs a key somewhere: the global server/.env key,
+      // or any worker's own override key (only workers that resolve a
+      // key are offered translate tasks — see claimTask).
+      if (!this.translationEnabled()) {
+        this.log(job, 'Translation skipped: no LLM key configured (global or per-worker)');
         job.stage = 'synthesizing';
       } else {
         const groups = groupSegments(segments);
@@ -453,7 +487,16 @@ export class Runner {
     const now = Date.now();
     const worker = this.findWorkerForClaim(workerId);
     if (!this.workerCanDo(worker, type)) return null;
+    // Translate tasks are only offered to a worker that can resolve an
+    // LLM key (own override, else the global one). Without this a
+    // keyless worker would claim the task and burn its retry budget;
+    // the task simply waits for a capable worker instead.
+    if (type === 'translate' && !this.workerLlm(worker).configured) return null;
     if (this.inFlightCount() >= this.maxInFlight) return null;
+    // A model-pinned worker only takes transcribe tasks whose job asks
+    // for that model. The pin is a capability constraint, not a
+    // rewrite — the job's model choice is never overridden.
+    const pin = type === 'transcribe' ? this.workerModelPin(worker) : null;
     const candidates = [];
     for (const job of this.store.listJobs()) {
       if (!ACTIVE_STAGES.has(job.stage)) continue;
@@ -463,6 +506,7 @@ export class Runner {
         // after EXCLUDE_GRACE_MS so a single-worker deployment can retry.
         if (task.excludeWorker === workerId &&
             !(task.requeuedAt && now - new Date(task.requeuedAt).getTime() > EXCLUDE_GRACE_MS)) continue;
+        if (pin && (job.config.model || 'large-v3') !== pin) continue;
         candidates.push({ job, task, weight: this.effectiveWeight(job, task) });
       }
     }
@@ -531,9 +575,13 @@ export class Runner {
       };
     }
     // translate: JSON payload (segments + LLM credentials for the worker).
+    // Credentials resolve per claiming worker: a per-worker override wins
+    // per field, otherwise the global server/.env config. task.workerId
+    // is set at claim time, so this also holds for the input fetch.
     const reseg = this.store.readJson(this.store.jobPath(job.id, 'resegmented.json'), { segments: [] });
     const groups = groupSegments(reseg.segments || []);
     const group = groups[task.groupIndex];
+    const llm = this.workerLlm(this.findWorkerForClaim(task.workerId));
     return {
       kind: 'json',
       payload: {
@@ -542,8 +590,8 @@ export class Runner {
         sourceLang: job.config.sourceLang,
         targetLang: job.config.targetLang,
         segments: group.segments,
-        llmApiKey: this.llm.apiKey,
-        llmModel: this.llm.model,
+        llmApiKey: llm.apiKey,
+        llmModel: llm.model,
       },
     };
   }

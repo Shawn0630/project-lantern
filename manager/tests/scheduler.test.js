@@ -60,10 +60,11 @@ test('claimTask only offers task kinds the worker is capable of', () => {
 test('claimTask offers everything to unknown workers and workers without capabilities', () => {
   const t2 = makeTask('t2', 'translate');
   const job = makeJob('j1', 'translating', [t2]);
-  const r = runner([job], [makeWorker('w1', { capabilities: null })]);
+  // A global key is configured, so the translate claim resolves one.
+  const r = runner([job], [makeWorker('w1', { capabilities: null })], { LLM_API_KEY: 'g-key' });
   assert.equal(r.claimTask('translate', 'nobody').task.id, 't2');
   const r2 = runner([makeJob('j2', 'translating', [makeTask('t3', 'translate')])],
-    [makeWorker('w1', { capabilities: null })]);
+    [makeWorker('w1', { capabilities: null })], { LLM_API_KEY: 'g-key' });
   assert.equal(r2.claimTask('translate', 'w1').task.id, 't3');
 });
 
@@ -191,7 +192,7 @@ test('transcribe fails permanently after 2 attempts', () => {
 test('translate survives 2 failures and fails on the 3rd', () => {
   const task = makeTask('t1', 'translate');
   const job = makeJob('j1', 'translating', [task]);
-  const r = runner([job], []);
+  const r = runner([job], [], { LLM_API_KEY: 'g-key' });
   failNTimes(r, job, task, 2);
   assert.equal(task.state, 'queued');
   assert.equal(task.attempts, 2);
@@ -312,4 +313,91 @@ test('failed-task worker exclusion expires after 60 s', () => {
   assert.equal(r.claimTask('transcribe', 'w1'), null);
   task.requeuedAt = iso(Date.now() - 61000);
   assert.equal(r.claimTask('transcribe', 'w1').task.id, 't1');
+});
+
+// ---- per-worker model pin ----
+test('a model-pinned worker only takes transcribe tasks for its model', () => {
+  const mk = (jobId, model, taskId) => {
+    const job = makeJob(jobId, 'transcribing', [makeTask(taskId, 'transcribe')]);
+    job.config = { model };
+    return job;
+  };
+  const jobs = [mk('j1', 'large-v3', 't1'), mk('j2', 'large-v3-turbo', 't2')];
+  const pinned = runner(jobs, [makeWorker('w1', { modelPin: 'large-v3-turbo' })]);
+  assert.equal(pinned.claimTask('transcribe', 'w1').task.id, 't2');
+  // A worker pinned to a model no queued job uses waits.
+  const waiting = runner([mk('j3', 'large-v3', 't3')], [makeWorker('w2', { modelPin: 'large-v3-turbo' })]);
+  assert.equal(waiting.claimTask('transcribe', 'w2'), null);
+});
+
+test('an unpinned worker takes any model', () => {
+  const job = makeJob('j1', 'transcribing', [makeTask('t1', 'transcribe')]);
+  job.config = { model: 'large-v3-turbo' };
+  const r = runner([job], [makeWorker('w1')]);
+  assert.equal(r.claimTask('transcribe', 'w1').task.id, 't1');
+});
+
+// ---- per-worker LLM ----
+test('workerLlm resolves per field with global fallback', () => {
+  const r = runner([], [], { LLM_API_KEY: 'g-key', LLM_MODEL: 'gemini-2.5-flash' });
+  assert.deepEqual(r.workerLlm(null), { apiKey: 'g-key', model: 'gemini-2.5-flash', configured: true });
+  assert.deepEqual(r.workerLlm({ llm: { apiKey: 'w-key', model: null } }),
+    { apiKey: 'w-key', model: 'gemini-2.5-flash', configured: true });
+  assert.deepEqual(r.workerLlm({ llm: { apiKey: null, model: 'gemini-2.5-pro' } }),
+    { apiKey: 'g-key', model: 'gemini-2.5-pro', configured: true });
+  const r2 = runner([], [], {});
+  assert.deepEqual(r2.workerLlm(null), { apiKey: '', model: 'gemini-2.5-flash', configured: false });
+});
+
+test('translationEnabled is true with a global key or any worker key', () => {
+  assert.equal(runner([], [], { LLM_API_KEY: 'g' }).translationEnabled(), true);
+  assert.equal(runner([], [], {}).translationEnabled(), false);
+  const r = runner([], [makeWorker('w1', { llm: { apiKey: 'w-key', model: null } })], {});
+  assert.equal(r.translationEnabled(), true);
+  const r2 = runner([], [makeWorker('w1', { llm: { apiKey: null, model: 'gemini-2.5-pro' } })], {});
+  assert.equal(r2.translationEnabled(), false);
+});
+
+test('translate tasks are only offered to workers that resolve a key', () => {
+  const mkJob = () => makeJob('j1', 'translating', [makeTask('t1', 'translate')]);
+  // No global key: a keyless worker waits, a worker with an override key is offered.
+  const r = runner([mkJob()], [
+    makeWorker('w1'),
+    makeWorker('w2', { llm: { apiKey: 'w-key', model: null } }),
+  ], {});
+  assert.equal(r.claimTask('translate', 'w1'), null);
+  assert.equal(r.claimTask('translate', 'nobody'), null);
+  assert.equal(r.claimTask('translate', 'w2').task.id, 't1');
+  // Global key: a worker without an override is offered, as before.
+  const r2 = runner([mkJob()], [makeWorker('w1')], { LLM_API_KEY: 'g-key' });
+  assert.equal(r2.claimTask('translate', 'w1').task.id, 't1');
+});
+
+test('translate task input carries the claiming worker LLM override', () => {
+  const segs = { segments: [{ text: 'hello', start: 0, end: 1 }] };
+  const store = {
+    jobs: [], workers: [],
+    listJobs() { return this.jobs; },
+    saveJob() {},
+    listWorkers() { return this.workers; },
+    saveWorkers(w) { this.workers = w; },
+    readJson() { return segs; },
+    jobPath() { return '/tmp/resegmented.json'; },
+  };
+  const job = makeJob('j1', 'translating', [makeTask('t1', 'translate', 'assigned', { workerId: 'w2', groupIndex: 0 })]);
+  job.config = { sourceLang: 'en', targetLang: 'zh-CN' };
+  store.jobs = [job];
+  store.workers = [
+    makeWorker('w1'),
+    makeWorker('w2', { llm: { apiKey: 'w-key', model: 'gemini-2.5-pro' } }),
+  ];
+  const r = new Runner(store, { env: { LLM_API_KEY: 'g-key', LLM_MODEL: 'gemini-2.5-flash' } });
+  const input = r.taskInput(job, job.tasks[0]);
+  assert.equal(input.payload.llmApiKey, 'w-key');
+  assert.equal(input.payload.llmModel, 'gemini-2.5-pro');
+  // A worker without an override gets the global credentials.
+  job.tasks[0].workerId = 'w1';
+  const input2 = r.taskInput(job, job.tasks[0]);
+  assert.equal(input2.payload.llmApiKey, 'g-key');
+  assert.equal(input2.payload.llmModel, 'gemini-2.5-flash');
 });

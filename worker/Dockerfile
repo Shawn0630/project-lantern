@@ -12,7 +12,7 @@ COPY worker.py gemini.py srt_utils.py burnin.py .
 
 ENV MANAGER_URL=http://manager:9400 \
     WORKER_PORT=9500 \
-    WHISPER_MODEL=small \
+    WHISPER_MODEL=large-v3 \
     HF_HOME=/models
 
 EXPOSE 9500

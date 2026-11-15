@@ -19,6 +19,39 @@ export function createRouter(store, runner) {
 
   const findTask = (taskId) => runner.findTask(taskId);
 
+  // The Whisper models a worker can be pinned to: the same list the job
+  // form offers, so a pin can never name a model no job uses.
+  const VALID_MODELS = (() => {
+    const type = getJobType('video-translation');
+    const field = type?.fields?.find((f) => f.key === 'model');
+    return new Set((field?.options || []).map((o) => o.value));
+  })();
+
+  // A worker record as the API may return it: the per-worker LLM key is
+  // NEVER sent back — only whether one is set, which model the override
+  // uses, and a last-4 hint so the UI can show what is stored.
+  const publicWorker = (w) => {
+    const { llm, ...rest } = w || {};
+    const pub = { ...rest, currentTask: currentTaskForWorker(w) };
+    pub.llm = !llm ? null : {
+      configured: Boolean(llm.apiKey),
+      model: llm.model || null,
+      keyHint: llm.apiKey ? `••••${String(llm.apiKey).slice(-4)}` : null,
+    };
+    return pub;
+  };
+
+  // Heartbeat models report, validated lightly: { loaded, available[] }.
+  const sanitizeModels = (models) => {
+    if (!models || typeof models !== 'object') return null;
+    return {
+      loaded: typeof models.loaded === 'string' ? models.loaded : null,
+      available: Array.isArray(models.available)
+        ? models.available.filter((m) => typeof m === 'string')
+        : [],
+    };
+  };
+
   // The task a worker is currently running, if any: tasks carry the
   // worker's id once assigned, so the Workers page can show what each
   // worker is doing without a second fetch. Matches on either the
@@ -43,7 +76,7 @@ export function createRouter(store, runner) {
     return null;
   };
 
-  router.get('/health', (req, res) => res.json({ ok: true, version: '1.2.0' }));
+  router.get('/health', (req, res) => res.json({ ok: true, version: '1.3.0' }));
 
   // Job-type registry: the UI renders the "new job" form from this
   // schema, so a new type is a registry entry, not a UI change.
@@ -130,10 +163,7 @@ export function createRouter(store, runner) {
   });
 
   // ---- workers ----
-  router.get('/workers', (req, res) => res.json(store.listWorkers().map((w) => ({
-    ...w,
-    currentTask: currentTaskForWorker(w),
-  }))));
+  router.get('/workers', (req, res) => res.json(store.listWorkers().map((w) => publicWorker(w))));
 
   router.post('/workers', (req, res) => {
     const { host, port, name } = req.body || {};
@@ -151,12 +181,15 @@ export function createRouter(store, runner) {
       lastSeen: null,
       load: null,
       model: null,
+      modelPin: null,
+      llm: null,
+      models: null,
       version: null,
       createdAt: new Date().toISOString(),
     };
     workers.push(worker);
     store.saveWorkers(workers);
-    res.status(201).json(worker);
+    res.status(201).json(publicWorker(worker));
   });
 
   router.delete('/workers/:id', (req, res) => {
@@ -165,8 +198,54 @@ export function createRouter(store, runner) {
     res.json({ ok: true });
   });
 
+  // Per-worker settings, set from the master: a Whisper model pin and an
+  // LLM override. Both live on the worker record in workers.json and
+  // take effect for tasks claimed afterwards; a task already in flight
+  // keeps the settings it claimed with.
+  //   { modelPin?: string|null, llm?: { apiKey?: string, model?: string } | null }
+  // modelPin: null/'' clears the pin; any other value must be a model
+  //   the job form offers (400 otherwise). Absent = unchanged.
+  // llm: null clears the override. An object applies per field:
+  //   apiKey present -> replace ('' clears the key), absent -> keep;
+  //   model present -> replace ('' = fall back to the global model),
+  //   absent -> keep. An override with neither field set is stored as
+  //   null (no override). The key is never returned: see publicWorker.
+  router.post('/workers/:id/settings', (req, res) => {
+    const workers = store.listWorkers();
+    const worker = workers.find((w) => w.id === req.params.id);
+    if (!worker) return res.status(404).json({ error: 'worker not found' });
+    const body = req.body || {};
+    if ('modelPin' in body) {
+      const pin = body.modelPin;
+      if (pin === null || pin === '') worker.modelPin = null;
+      else if (typeof pin === 'string' && VALID_MODELS.has(pin)) worker.modelPin = pin;
+      else return res.status(400).json({ error: `unknown model: ${String(pin)}` });
+    }
+    if ('llm' in body) {
+      const llm = body.llm;
+      if (llm === null) {
+        worker.llm = null;
+      } else if (llm && typeof llm === 'object' && !Array.isArray(llm)) {
+        const next = { ...(worker.llm || { apiKey: null, model: null }) };
+        if ('apiKey' in llm) {
+          if (typeof llm.apiKey !== 'string') return res.status(400).json({ error: 'llm.apiKey must be a string' });
+          next.apiKey = llm.apiKey || null;
+        }
+        if ('model' in llm) {
+          if (typeof llm.model !== 'string') return res.status(400).json({ error: 'llm.model must be a string' });
+          next.model = llm.model || null;
+        }
+        worker.llm = (next.apiKey || next.model) ? next : null;
+      } else {
+        return res.status(400).json({ error: 'llm must be an object or null' });
+      }
+    }
+    store.saveWorkers(workers);
+    res.json(publicWorker(worker));
+  });
+
   router.post('/workers/heartbeat', (req, res) => {
-    const { id, bootId, host, port, name, load, model, version, capabilities, ffmpeg, stats } = req.body || {};
+    const { id, bootId, host, port, name, load, model, models, version, capabilities, ffmpeg, stats } = req.body || {};
     if (!host || !port) return res.status(400).json({ error: 'host and port are required' });
     const workers = store.listWorkers();
     // Match on the worker-reported stable id first: the same machine
@@ -189,6 +268,9 @@ export function createRouter(store, runner) {
         lastSeen: new Date().toISOString(),
         load: load ?? null,
         model: model || null,
+        modelPin: null,
+        llm: null,
+        models: sanitizeModels(models),
         version: version || null,
         capabilities: Array.isArray(capabilities) ? capabilities : null,
         ffmpeg: ffmpeg ?? null,
@@ -210,6 +292,9 @@ export function createRouter(store, runner) {
       if (id && !worker.workerId) worker.workerId = id;
       if (load !== undefined) worker.load = load;
       if (model) worker.model = model;
+      // Only overwrite the models report when the worker sent one:
+      // pre-1.3 workers never send it, and their last report stays.
+      if (models !== undefined) worker.models = sanitizeModels(models);
       if (version) worker.version = version;
       if (name) worker.name = name;
       if (Array.isArray(capabilities)) worker.capabilities = capabilities;

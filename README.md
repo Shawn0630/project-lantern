@@ -30,7 +30,8 @@ transcription (transcribe → merge → translate → subtitle synthesis).
   timestamps, translates via Gemini REST, uploads JSON results.
   Serves a small `/health` API on its own port. Each worker advertises
   its capabilities on every heartbeat (`transcribe`, `translate`, and
-  `burnin` when ffmpeg is on PATH) plus host load stats; the heartbeat
+  `burnin` when ffmpeg is on PATH) plus host load stats and its
+  downloaded Whisper models (loaded one marked ★); the heartbeat
   runs on its own thread so a long task never makes the worker look dead.
   Load stats come from `psutil` when installed (a real dependency);
   on Linux the worker falls back to `/proc/meminfo` + load average, but
@@ -43,6 +44,11 @@ transcription (transcribe → merge → translate → subtitle synthesis).
   (`transcribe` / `translate` / `burnin`); `GET /api/tasks/next` only
   offers tasks the requesting worker can do. Workers that never report
   capabilities are assumed able to do everything (back-compat).
+- **Model pin.** A worker pinned to a Whisper model (Workers page) is
+  only offered transcribe tasks whose job asks for that model; it
+  waits otherwise. The pin never rewrites a job's model choice.
+- **Translate key gate.** Translate tasks are only offered to workers
+  that resolve an LLM key — their own override, else the global one.
 - **Weights.** Each task carries a base `weight` (0 for now). The `next`
   query orders by effective weight DESC, then `queuedAt` ASC. A job that
   already started (any task done or assigned) gives its remaining tasks
@@ -174,6 +180,32 @@ Workers page, which shows each worker's status, current task
 (CPU%, memory, load). To give it a name up front, use the Workers page
 (Add worker) or set `WORKER_NAME`.
 
+### Per-worker settings (v1.3)
+
+The Workers page shows, per worker, its downloaded Whisper models
+(★ marks the loaded one), its model pin, and its LLM override — and
+lets you change the last two with the Settings button
+(`POST /api/workers/:id/settings`).
+
+- **Models.** Every heartbeat reports the models the worker has on
+  disk (its HF cache — the `whisper-models` volume in Docker) plus
+  the one currently loaded. A model appears once its download is
+  complete; a first transcribe task downloads the job's model on
+  demand (~3 GB for large-v3, ~1.6 GB for large-v3-turbo).
+- **Model pin.** Pins a worker to one Whisper model: it is only
+  offered transcribe tasks whose job asks for that model, and waits
+  otherwise. The pin never rewrites a job's model choice, and a task
+  already running keeps its model when the pin changes. Clear the pin
+  to go back to any model.
+- **LLM override.** A per-worker Gemini API key and/or model. Each
+  field falls back to the global `server/.env` setting when blank, so
+  you can override just the key, just the model, or both. The key is
+  stored in `data/workers.json` (manager-local, same trust as
+  `server/.env`) and is never returned by the API — the UI shows only
+  a last-4 hint. Translate tasks are created when a key exists
+  globally or on any worker, and are only offered to workers that
+  resolve a key.
+
 ## Job options (per job)
 
 | Option | Default | Notes |
@@ -191,7 +223,8 @@ Workers page, which shows each worker's status, current task
 ## v1 limits
 
 - The Gemini API key is passed to workers inside translate task payloads
-  (LAN-trusted v1 simplification — only run workers you trust).
+  (global key, or the claiming worker's override — LAN-trusted v1
+  simplification, only run workers you trust).
 - Translation needs network access to Google's Gemini API from the worker.
 - Burn-in is distributed: workers burn segments; the manager only cuts
   segments and concatenates. The manager never runs a burn-in encode.

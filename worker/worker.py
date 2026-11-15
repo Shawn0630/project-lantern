@@ -54,7 +54,7 @@ import burnin
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("lantern-worker")
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 MANAGER_URL = os.environ.get("MANAGER_URL", "").rstrip("/")
 WORKER_PORT = int(os.environ.get("WORKER_PORT", "9500"))
 WORKER_HOST = os.environ.get("WORKER_HOST", socket.gethostname())
@@ -106,6 +106,7 @@ def health():
         "worker_id": WORKER_ID,
         "version": VERSION,
         "model": _state["model"],
+        "models": models_report(),
         "current_task": _state["current_task"],
     }
 
@@ -127,6 +128,72 @@ def get_model(model_name: str):
         _model_cache[model_name] = WhisperModel(model_name, device="cpu", compute_type="int8")
         _state["model"] = model_name
     return _model_cache[model_name]
+
+
+# Known faster-whisper model repos (mirrors faster_whisper.utils._MODELS):
+# HF repo id -> canonical model name shown on the Workers page and
+# accepted as a per-worker pin. Aliases ('large', 'turbo') resolve to
+# the same repo as their canonical name, so they are not listed twice.
+FASTER_WHISPER_REPOS = {
+    "Systran/faster-whisper-tiny.en": "tiny.en",
+    "Systran/faster-whisper-tiny": "tiny",
+    "Systran/faster-whisper-base.en": "base.en",
+    "Systran/faster-whisper-base": "base",
+    "Systran/faster-whisper-small.en": "small.en",
+    "Systran/faster-whisper-small": "small",
+    "Systran/faster-whisper-medium.en": "medium.en",
+    "Systran/faster-whisper-medium": "medium",
+    "Systran/faster-whisper-large-v1": "large-v1",
+    "Systran/faster-whisper-large-v2": "large-v2",
+    "Systran/faster-whisper-large-v3": "large-v3",
+    "Systran/faster-distil-whisper-large-v2": "distil-large-v2",
+    "Systran/faster-distil-whisper-medium.en": "distil-medium.en",
+    "Systran/faster-distil-whisper-small.en": "distil-small.en",
+    "Systran/faster-distil-whisper-large-v3": "distil-large-v3",
+    "distil-whisper/distil-large-v3.5-ct2": "distil-large-v3.5",
+    "mobiuslabsgmbh/faster-whisper-large-v3-turbo": "large-v3-turbo",
+}
+
+
+def hf_hub_dir():
+    """Hugging Face hub cache dir: HF_HUB_CACHE wins, else $HF_HOME/hub
+    (in Docker HF_HOME=/models, backed by the whisper-models volume)."""
+    if os.environ.get("HF_HUB_CACHE"):
+        return Path(os.environ["HF_HUB_CACHE"])
+    home = os.environ.get("HF_HOME") or (Path.home() / ".cache" / "huggingface")
+    return Path(home) / "hub"
+
+
+def list_downloaded_models():
+    """Whisper models present on disk: in-memory cache keys plus any
+    known faster-whisper model repo in the HF hub cache with a complete
+    snapshot (model.bin present — huggingface_hub only moves the file
+    into place once fully downloaded). Never raises: the heartbeat
+    must survive a broken cache dir."""
+    found = set(_model_cache)
+    try:
+        hub = hf_hub_dir()
+        if hub.is_dir():
+            for repo_dir in hub.glob("models--*"):
+                name = repo_dir.name[len("models--"):]
+                parts = name.split("--", 1)
+                if len(parts) != 2:
+                    continue
+                model = FASTER_WHISPER_REPOS.get(f"{parts[0]}/{parts[1]}")
+                if not model:
+                    continue
+                for snap in (repo_dir / "snapshots").glob("*"):
+                    if (snap / "model.bin").is_file():
+                        found.add(model)
+                        break
+    except OSError:
+        pass
+    return sorted(found)
+
+
+def models_report():
+    """Heartbeat/health view of this worker's models."""
+    return {"loaded": _state["model"], "available": list_downloaded_models()}
 
 
 def decode_audio_ffmpeg(path: str):
@@ -223,6 +290,7 @@ def heartbeat():
             "name": WORKER_NAME,
             "load": 1 if _state["current_task"] else 0,
             "model": _state["model"] or DEFAULT_MODEL,
+            "models": models_report(),
             "version": VERSION,
             "capabilities": capabilities(),
             "ffmpeg": shutil.which("ffmpeg") is not None,

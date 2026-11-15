@@ -269,3 +269,54 @@ def test_heartbeat_sends_stable_id_and_boot_id(monkeypatch):
         assert payload["id"] == worker_mod.WORKER_ID
         assert payload["bootId"] == worker_mod.BOOT_ID
     assert posted[0]["bootId"] == posted[1]["bootId"]
+
+
+# ---- models report (per-worker models) ----
+def _fake_hf_cache(tmp_path, repos):
+    """Build a fake HF hub cache: repos = {repo_id: has_model_bin}."""
+    hub = tmp_path / "hub"
+    for repo_id, has_bin in repos.items():
+        org, name = repo_id.split("/", 1)
+        snap = hub / f"models--{org}--{name}" / "snapshots" / "abc123"
+        snap.mkdir(parents=True)
+        if has_bin:
+            (snap / "model.bin").write_bytes(b"fake")
+        else:
+            (snap / "config.json").write_text("{}")
+    return hub
+
+
+def test_list_downloaded_models_scans_hf_cache(monkeypatch, tmp_path):
+    _fake_hf_cache(tmp_path, {
+        "Systran/faster-whisper-large-v3": True,
+        "mobiuslabsgmbh/faster-whisper-large-v3-turbo": True,
+        "Systran/faster-whisper-small": False,  # incomplete snapshot: no model.bin
+        "someone/random-model": True,  # unknown repo: not a Whisper model
+    })
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    assert worker_mod.list_downloaded_models() == ["large-v3", "large-v3-turbo"]
+
+
+def test_list_downloaded_models_empty_without_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    assert worker_mod.list_downloaded_models() == []
+
+
+def test_list_downloaded_models_includes_loaded_models(monkeypatch, tmp_path):
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    monkeypatch.setitem(worker_mod._model_cache, "tiny", object())
+    assert worker_mod.list_downloaded_models() == ["tiny"]
+
+
+def test_heartbeat_reports_models(monkeypatch, tmp_path):
+    _fake_hf_cache(tmp_path, {"Systran/faster-whisper-large-v3": True})
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    posted = {}
+
+    def fake_post(path, payload, timeout=30):
+        posted["payload"] = payload
+        return FakeResponse(200, {"id": "x", "registered": False})
+
+    monkeypatch.setattr(worker_mod, "manager_post", fake_post)
+    worker_mod.heartbeat()
+    assert posted["payload"]["models"] == {"loaded": None, "available": ["large-v3"]}

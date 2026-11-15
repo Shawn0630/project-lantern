@@ -16,6 +16,10 @@ probe/*.pid
 probe/*.id
 probe/data-v11/
 probe/data-v12/
+probe/data-v13/
+probe/fake-hf/
+probe/*.out
+probe/*.json
 probe/data-ct/
 probe/data-dedupe/
 probe/data-dedupe-w1/

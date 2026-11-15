@@ -144,3 +144,77 @@ test('same bootId does not re-queue', async () => {
     assert.deepEqual(calls, []);
   });
 });
+
+// ---- models report + per-worker settings ----
+async function postJson(port, path, body, expectStatus = 200) {
+  const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  assert.equal(res.status, expectStatus);
+  return res.json();
+}
+
+async function postSettings(port, id, body, expectStatus = 200) {
+  return postJson(port, `/api/workers/${encodeURIComponent(id)}/settings`, body, expectStatus);
+}
+
+async function firstWorkerId(port) {
+  const workers = await getWorkers(port);
+  assert.equal(workers.length, 1);
+  return workers[0].id;
+}
+
+test('heartbeat stores the worker models report', async () => {
+  const store = fakeStore([]);
+  await withServer(store, {}, async (port) => {
+    await heartbeat(port, hb('stable-1', 'aaa111aaaaaa', {
+      models: { loaded: 'large-v3-turbo', available: ['large-v3', 'large-v3-turbo'] },
+    }));
+    const workers = await getWorkers(port);
+    assert.deepEqual(workers[0].models, { loaded: 'large-v3-turbo', available: ['large-v3', 'large-v3-turbo'] });
+    // A heartbeat without a models report leaves the last report in place.
+    await heartbeat(port, hb('stable-1', 'aaa111aaaaaa'));
+    assert.deepEqual((await getWorkers(port))[0].models,
+      { loaded: 'large-v3-turbo', available: ['large-v3', 'large-v3-turbo'] });
+  });
+});
+
+test('POST /workers/:id/settings pins a model and validates it', async () => {
+  const store = fakeStore([]);
+  await withServer(store, {}, async (port) => {
+    await heartbeat(port, hb('stable-1', 'aaa111aaaaaa'));
+    const id = await firstWorkerId(port);
+    const pinned = await postSettings(port, id, { modelPin: 'large-v3-turbo' });
+    assert.equal(pinned.modelPin, 'large-v3-turbo');
+    await postSettings(port, id, { modelPin: 'not-a-model' }, 400);
+    const cleared = await postSettings(port, id, { modelPin: null });
+    assert.equal(cleared.modelPin, null);
+    await postSettings(port, 'no-such-worker', { modelPin: 'large-v3' }, 404);
+  });
+});
+
+test('POST /workers/:id/settings stores an LLM override and never returns the key', async () => {
+  const store = fakeStore([]);
+  await withServer(store, {}, async (port) => {
+    await heartbeat(port, hb('stable-1', 'aaa111aaaaaa'));
+    const id = await firstWorkerId(port);
+    const saved = await postSettings(port, id, { llm: { apiKey: 'sk-secret-1234', model: 'gemini-2.5-pro' } });
+    assert.deepEqual(saved.llm, { configured: true, model: 'gemini-2.5-pro', keyHint: '••••1234' });
+    // The raw key lives only in the server-side record, never in API output.
+    const raw = JSON.stringify(await getWorkers(port));
+    assert.equal(raw.includes('sk-secret-1234'), false);
+    assert.equal(raw.includes('••••1234'), true);
+    assert.equal(store.workers[0].llm.apiKey, 'sk-secret-1234');
+    // A partial update keeps the stored key when apiKey is omitted.
+    const kept = await postSettings(port, id, { llm: { model: 'gemini-2.0-flash' } });
+    assert.deepEqual(kept.llm, { configured: true, model: 'gemini-2.0-flash', keyHint: '••••1234' });
+    // Clearing the key keeps the model override.
+    const noKey = await postSettings(port, id, { llm: { apiKey: '' } });
+    assert.deepEqual(noKey.llm, { configured: false, model: 'gemini-2.0-flash', keyHint: null });
+    // Clearing the whole override returns llm to null.
+    const cleared = await postSettings(port, id, { llm: null });
+    assert.equal(cleared.llm, null);
+  });
+});

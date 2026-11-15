@@ -43,9 +43,22 @@
     </div>
     <div class="card table-card">
       <table id="workers-table">
-        <thead><tr><th>Name</th><th>Host</th><th>Status</th><th>Last seen</th><th>Load</th><th>Current task</th><th>Model</th><th>Capabilities</th><th>Resources</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Host</th><th>Status</th><th>Last seen</th><th>Load</th><th>Current task</th><th>Model</th><th>Models</th><th>Pin</th><th>LLM</th><th>Capabilities</th><th>Resources</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
+    </div>
+    <div class="card" id="worker-settings-card" hidden>
+      <h3>Worker settings — <span id="worker-settings-name"></span></h3>
+      <form id="worker-settings-form">
+        <label>Model pin <select name="modelPin" id="worker-settings-pin"></select></label>
+        <label>LLM model <input type="text" name="llmModel" id="worker-settings-llm-model" placeholder="global model"></label>
+        <label>LLM API key <input type="password" name="llmApiKey" id="worker-settings-llm-key" placeholder="leave blank to keep"></label>
+        <button type="submit">Save settings</button>
+        <button type="button" id="worker-settings-clear-pin">Clear pin</button>
+        <button type="button" id="worker-settings-reset-llm">Reset LLM to global</button>
+        <span id="worker-settings-status"></span>
+      </form>
+      <small>Pin: this worker only takes transcribe tasks for the pinned model (a task already running keeps its model). LLM: per-worker key/model — blank fields fall back to the global server settings. The key is never shown back; leave it blank to keep the stored one.</small>
     </div>
   </section>
 

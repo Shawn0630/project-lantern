@@ -181,6 +181,19 @@ function fmtCurrentTask(ct) {
   return `<a href="#/jobs/${esc(ct.jobId)}">${esc(ct.jobName)} — ${esc(label)}</a>`;
 }
 
+// Downloaded models: the loaded one gets a star, the rest list plain.
+function fmtModels(models) {
+  if (!models || !Array.isArray(models.available) || models.available.length === 0) return '—';
+  return models.available.map((m) => (m === models.loaded ? `${esc(m)} ★` : esc(m))).join(', ');
+}
+
+function fmtWorkerLlm(w) {
+  if (!w.llm) return 'global';
+  const parts = [w.llm.model ? esc(w.llm.model) : 'global model'];
+  parts.push(w.llm.configured ? `key ${esc(w.llm.keyHint || '••••')}` : 'global key');
+  return parts.join(' · ');
+}
+
 async function loadWorkers() {
   const workers = await api('/api/workers');
   const tbody = $('#workers-table tbody');
@@ -192,11 +205,98 @@ async function loadWorkers() {
     <td>${w.load == null ? '—' : esc(w.load)}</td>
     <td>${fmtCurrentTask(w.currentTask)}</td>
     <td>${esc(w.model || '—')}</td>
+    <td>${fmtModels(w.models)}</td>
+    <td>${w.modelPin ? esc(w.modelPin) : '—'}</td>
+    <td>${fmtWorkerLlm(w)}</td>
     <td>${Array.isArray(w.capabilities) ? esc(w.capabilities.join(', ')) : '—'}</td>
     <td>${esc(fmtStats(w.stats))}</td>
-    <td><button data-del-worker="${esc(w.id)}">Delete</button></td>
-  </tr>`).join('') || '<tr><td colspan="10">No workers yet</td></tr>';
+    <td><button data-settings-worker="${esc(w.id)}">Settings</button> <button data-del-worker="${esc(w.id)}">Delete</button></td>
+  </tr>`).join('') || '<tr><td colspan="13">No workers yet</td></tr>';
 }
+
+// ---- worker settings: model pin + per-worker LLM override ----
+// The pin/model options come from GET /api/job-types (the same list
+// the job form offers); the fallback only matters if that fetch fails.
+let modelOptions = null;
+let settingsWorkerId = null;
+
+async function ensureModelOptions() {
+  if (modelOptions) return modelOptions;
+  try {
+    const types = await api('/api/job-types');
+    const type = types.find((t) => t.id === 'video-translation');
+    const field = type && type.fields.find((f) => f.key === 'model');
+    modelOptions = (field && field.options.map((o) => o.value)) || [];
+  } catch {
+    modelOptions = [];
+  }
+  if (!modelOptions.length) modelOptions = ['tiny', 'base', 'small', 'medium', 'large-v3', 'large-v3-turbo'];
+  return modelOptions;
+}
+
+async function openWorkerSettings(id) {
+  const workers = await api('/api/workers');
+  const w = workers.find((x) => x.id === id);
+  if (!w) return;
+  settingsWorkerId = id;
+  const options = await ensureModelOptions();
+  $('#worker-settings-name').textContent = w.name;
+  $('#worker-settings-pin').innerHTML = '<option value="">(no pin — any model)</option>' +
+    options.map((m) => `<option value="${esc(m)}"${w.modelPin === m ? ' selected' : ''}>${esc(m)}</option>`).join('');
+  $('#worker-settings-llm-model').value = (w.llm && w.llm.model) || '';
+  const keyInput = $('#worker-settings-llm-key');
+  keyInput.value = '';
+  keyInput.placeholder = (w.llm && w.llm.keyHint) ? `${w.llm.keyHint} — leave blank to keep` : 'leave blank to keep global key';
+  $('#worker-settings-status').textContent = '';
+  $('#worker-settings-card').hidden = false;
+}
+
+async function saveWorkerSettings(body) {
+  if (!settingsWorkerId) return;
+  await api(`/api/workers/${encodeURIComponent(settingsWorkerId)}/settings`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  loadWorkers();
+  openWorkerSettings(settingsWorkerId);
+}
+
+$('#worker-settings-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!settingsWorkerId) return;
+  const status = $('#worker-settings-status');
+  const llmKey = $('#worker-settings-llm-key').value;
+  const body = {
+    modelPin: $('#worker-settings-pin').value || null,
+    llm: { model: $('#worker-settings-llm-model').value.trim() },
+  };
+  // The key is only sent when typed: blank keeps the stored one.
+  if (llmKey) body.llm.apiKey = llmKey;
+  status.textContent = 'Saving…';
+  try {
+    await saveWorkerSettings(body);
+    $('#worker-settings-status').textContent = 'Saved';
+  } catch (err) {
+    status.textContent = 'Save failed: ' + err.message;
+  }
+});
+
+$('#worker-settings-clear-pin').addEventListener('click', async () => {
+  try {
+    await saveWorkerSettings({ modelPin: null });
+    $('#worker-settings-status').textContent = 'Pin cleared';
+  } catch (err) {
+    $('#worker-settings-status').textContent = 'Clear failed: ' + err.message;
+  }
+});
+
+$('#worker-settings-reset-llm').addEventListener('click', async () => {
+  try {
+    await saveWorkerSettings({ llm: null });
+    $('#worker-settings-status').textContent = 'LLM reset to global';
+  } catch (err) {
+    $('#worker-settings-status').textContent = 'Reset failed: ' + err.message;
+  }
+});
 
 async function loadJobDetail(id) {
   const job = await api(`/api/jobs/${encodeURIComponent(id)}`);
@@ -311,10 +411,19 @@ $('#worker-form').addEventListener('submit', async (e) => {
 });
 
 document.addEventListener('click', async (e) => {
+  const settingsBtn = e.target.closest('[data-settings-worker]');
+  if (settingsBtn) {
+    openWorkerSettings(settingsBtn.dataset.settingsWorker).catch(() => {});
+    return;
+  }
   const btn = e.target.closest('[data-del-worker]');
   if (!btn) return;
   if (!confirm('Delete this worker?')) return;
   await api(`/api/workers/${encodeURIComponent(btn.dataset.delWorker)}`, { method: 'DELETE' });
+  if (settingsWorkerId === btn.dataset.delWorker) {
+    settingsWorkerId = null;
+    $('#worker-settings-card').hidden = true;
+  }
   loadWorkers();
 });
 
