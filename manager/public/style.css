@@ -233,6 +233,10 @@ td .pill { margin-left: 0; }
 /* ---- workers / job detail ---- */
 #worker-form { display: flex; flex-wrap: wrap; gap: 14px; align-items: end; margin: 0; }
 #worker-form label { display: flex; flex-direction: column; font-size: 13px; font-weight: 600; color: var(--muted); gap: 6px; }
+/* Workers table has 13 columns: scroll horizontally inside its card
+   instead of being clipped, and keep every cell on one line. */
+#view-workers .table-card { overflow-x: auto; }
+#workers-table th, #workers-table td { white-space: nowrap; }
 
 pre {
   background: #f6f8fa;
