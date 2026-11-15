@@ -134,14 +134,36 @@ MANAGER_URL=http://127.0.0.1:9400 WORKER_PORT=9500 .venv/bin/python worker.py
 
 ## Add a LAN worker
 
-On any machine on the same network (Docker):
+On any machine on the same network, the one-command way is the
+worker-only compose file (Docker):
 
 ```bash
-docker run -d --name lantern-worker -p 9500:9500 \
+git clone https://github.com/Shawn0630/project-lantern.git
+cd project-lantern
+MANAGER_URL=http://<MANAGER_LAN_IP>:9400 docker compose -f docker-compose.worker.yml up -d --build
+```
+
+`MANAGER_URL` is the manager's LAN address (e.g. `http://192.168.1.5:9400` —
+find the Mac's IP in System Settings → Wi-Fi). It is required: the command
+fails loudly if it is unset. Or put `MANAGER_URL=http://<MANAGER_LAN_IP>:9400`
+in a `.env` file next to the compose file and run the command without the
+inline variable. `WHISPER_MODEL` defaults to `small` (`tiny` for tests,
+`large-v3` for quality). No port is published: the manager never dials the
+worker (worker-pull only). The `worker-data` volume holds the worker's
+stable id, so a redeploy reuses the same Workers row instead of
+registering a new one.
+
+Or with plain `docker run` (same idea, more flags):
+
+```bash
+docker build -t lantern-worker ./worker
+docker run -d --name lantern-worker \
   -e MANAGER_URL=http://<MANAGER_LAN_IP>:9400 \
   -e WORKER_PORT=9500 \
   -e WHISPER_MODEL=small \
+  -e WORKER_DATA_DIR=/data \
   -v whisper-models:/models \
+  -v lantern-worker-data:/data \
   lantern-worker
 ```
 

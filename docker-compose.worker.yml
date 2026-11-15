@@ -1,0 +1,43 @@
+# Lantern worker-only deploy (e.g. a Windows 10/11 machine with Docker
+# Desktop). One command, no manager on this machine — the worker pulls
+# tasks from the manager over the LAN.
+#
+#   git clone https://github.com/Shawn0630/project-lantern.git
+#   cd project-lantern
+#   MANAGER_URL=http://<Mac LAN IP>:9400 docker compose -f docker-compose.worker.yml up -d --build
+#
+# MANAGER_URL is required (no default): it is the manager's LAN address,
+# e.g. http://192.168.1.5:9400 — find the Mac's IP in System Settings ->
+# Wi-Fi. The command fails loudly if it is unset. Or put
+# `MANAGER_URL=http://<Mac LAN IP>:9400` in a `.env` file next to this
+# file and run the command without the inline variable.
+# WHISPER_MODEL defaults to small; use tiny for tests or large-v3 for
+# quality: WHISPER_MODEL=large-v3 docker compose -f docker-compose.worker.yml up -d --build
+#
+# Notes:
+# - No port is published: the manager never dials the worker (worker-pull
+#   only), so nothing needs to reach this machine. Add a 9500:9500 mapping
+#   only if you want to check http://localhost:9500/health by hand.
+# - The worker-data volume holds the stable worker id (see worker.py
+#   resolve_worker_id): without it every recreate registers a brand-new
+#   worker row. Each machine gets its own volume — never share one
+#   worker-data volume between two workers.
+# - First start downloads the whisper model into the whisper-models volume
+#   (a few minutes for small); later starts reuse it.
+services:
+  worker:
+    build: ./worker
+    environment:
+      MANAGER_URL: ${MANAGER_URL:?set MANAGER_URL to http://<Mac LAN IP>:9400}
+      WORKER_PORT: "9500"
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      # Stable worker id lives in /data (worker-data volume).
+      WORKER_DATA_DIR: /data
+    volumes:
+      - whisper-models:/models
+      - worker-data:/data
+    restart: unless-stopped
+
+volumes:
+  whisper-models:
+  worker-data:
