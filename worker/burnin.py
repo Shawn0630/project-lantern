@@ -71,13 +71,15 @@ def build_burnin_cmd(segment_path, ass_path, out_path, trim_start, duration, crf
     re-encoded to AAC (never stream-copied, because the trim needs
     frame-accurate audio); when the segment has no audio stream, -an is used.
     No resolution or frame-rate flags: the output keeps the input's.
+    Pixel format is forced to 8-bit yuv420p so a 10-bit/HDR source does
+    not produce High 10 output that stock players cannot decode.
     """
     cmd = [
         "ffmpeg", "-y",
         "-ss", str(trim_start),
         "-i", segment_path,
         "-vf", f"subtitles='{escape_filter_path(ass_path)}'",
-        "-c:v", "libx264", "-crf", str(crf),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", str(crf),
     ]
     if has_audio:
         cmd += ["-c:a", "aac", "-b:a", str(audio_bitrate or 128000)]

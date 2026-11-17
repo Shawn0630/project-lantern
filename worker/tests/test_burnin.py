@@ -23,6 +23,7 @@ def test_build_burnin_cmd_flags():
     assert cmd.index("-ss") < cmd.index("-i")  # input seek: trim before decode
     assert cmd[cmd.index("-t") + 1] == "29.05"
     assert "-c:v" in cmd and "libx264" in cmd
+    assert "-pix_fmt" in cmd and cmd[cmd.index("-pix_fmt") + 1] == "yuv420p"
     assert cmd[cmd.index("-crf") + 1] == "20"
     vf = cmd[cmd.index("-vf") + 1]
     assert vf.startswith("subtitles='") and "a.ass" in vf
