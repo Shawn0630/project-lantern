@@ -246,8 +246,21 @@ td .pill { margin-left: 0; }
 #workers-table td { vertical-align: top; }
 #workers-table .cell-main { display: block; }
 #workers-table .cell-sub { display: block; color: var(--muted); font-size: 12.5px; margin-top: 2px; }
-#workers-table .row-actions { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+#workers-table .row-actions { display: flex; flex-direction: row; gap: 8px; align-items: flex-start; }
 #workers-table .row-actions button { white-space: nowrap; }
+/* Icon buttons (workers table actions): a quiet gear for Settings, a
+   red trash for Delete — the old full-width blue text buttons read as
+   primary actions and crowded the row. */
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; padding: 0;
+  background: #fff; border: 1px solid var(--line); border-radius: 8px;
+  color: var(--muted); cursor: pointer;
+}
+.icon-btn:hover { border-color: var(--accent); color: var(--ink); }
+.icon-btn svg { width: 16px; height: 16px; display: block; }
+.icon-btn.danger { background: var(--bad-bg); border-color: var(--bad); color: var(--bad); }
+.icon-btn.danger:hover { background: var(--bad); border-color: var(--bad); color: #fff; }
 @media (max-width: 760px) {
   #workers-table thead { display: none; }
   #workers-table, #workers-table tbody, #workers-table tr, #workers-table td { display: block; width: auto; }
