@@ -114,7 +114,11 @@ h3 { font-size: 15px; margin: 0 0 14px; }
 .field-label { font-size: 13px; font-weight: 600; color: var(--muted); }
 .field-file { grid-column: 1 / -1; }
 
+/* One height for every form control: Chrome renders <select> 2px taller
+   than <input> with the same padding, so the dropdowns never matched
+   the number/text boxes next to them. */
 input, select {
+  height: 42px;
   padding: 10px 12px;
   border: 1px solid var(--input-line);
   border-radius: 8px;
