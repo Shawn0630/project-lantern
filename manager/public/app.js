@@ -58,9 +58,11 @@ async function refreshHealth() {
 // ---- new job: pick a type first, then render that type's form ----
 // The form is built from the GET /api/job-types schema, so a new job
 // type needs no UI change — only a registry entry server-side.
-// The video can come from an upload (as before) or from the repo:
-// the source toggle swaps the file dropzone for a repo-video select,
-// and the submit sends repoVideoId instead of a file part.
+// The video can come from an upload or from the repo: the source toggle
+// swaps the file dropzone for a repo-video select. Either way the job is
+// created from a repo video — an upload first goes into the repo (POST
+// /api/repo/videos), then the job references the returned video id, so
+// the file stays available for later jobs.
 let jobTypes = [];
 let selectedJobType = null;
 let jobSource = 'upload'; // 'upload' | 'repo'
@@ -107,7 +109,7 @@ async function loadJobTypes() {
 
 function renderTypePicker() {
   $('#job-type-picker').innerHTML = jobTypes.map((t) => `<button type="button"
-    class="type-card${selectedJobType && t.id === selectedJobType.id ? ' selected' : ''}"
+    class="seg-btn${selectedJobType && t.id === selectedJobType.id ? ' selected' : ''}"
     data-type="${esc(t.id)}">${esc(t.name)}</button>`).join('')
     || '<div class="empty-state">No job types available</div>';
 }
@@ -146,7 +148,7 @@ function renderJobForm(type) {
     : '';
   form.innerHTML = repoHtml + `<div class="form-grid">${fields.map(fieldHtml).join('')}</div>`
     + (toggles.length ? `<div class="toggles">${toggles.map(fieldHtml).join('')}</div>` : '')
-    + `<div class="form-actions"><button type="submit" class="btn-primary">${jobSource === 'repo' ? 'Create job' : 'Upload'}</button><span id="upload-status"></span></div>`;
+    + `<div class="form-actions"><button type="submit" class="btn-primary">Create job</button><span id="upload-status"></span></div>`;
   form.hidden = false;
   wireDropzones(form);
   if (jobSource === 'repo') refreshRepoSelect();
@@ -509,28 +511,51 @@ function route() {
 $('#upload-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const status = $('#upload-status');
-  status.textContent = jobSource === 'repo' ? 'Creating job…' : 'Uploading…';
+  status.textContent = 'Creating job…';
   try {
-    const fd = new FormData(e.target);
+    const form = e.target;
+    // Non-file fields only: the file input never goes to /api/jobs. An
+    // upload first lands in the repo; the job is then created from the
+    // returned repo video id, same as the From-repo path.
+    const jobFd = new FormData();
+    for (const [k, v] of new FormData(form).entries()) {
+      if (v instanceof File) continue;
+      jobFd.append(k, v);
+    }
     if (selectedJobType) {
-      fd.set('jobType', selectedJobType.id);
+      jobFd.set('jobType', selectedJobType.id);
       for (const f of selectedJobType.fields) {
-        if (f.kind === 'checkbox') fd.set(f.key, e.target.elements[f.key].checked ? 'true' : 'false');
+        if (f.kind === 'checkbox') jobFd.set(f.key, form.elements[f.key].checked ? 'true' : 'false');
       }
     }
-    if (jobSource === 'repo') {
-      const videoId = e.target.elements.repoVideo ? e.target.elements.repoVideo.value : '';
+    if (jobSource === 'upload') {
+      const fileInput = form.querySelector('input[type="file"]');
+      const file = fileInput && fileInput.files && fileInput.files[0];
+      if (!file) throw new Error('choose a video file first');
+      status.textContent = 'Uploading to repo…';
+      const repoFd = new FormData();
+      repoFd.append('file', file);
+      const upRes = await fetch('/api/repo/videos', { method: 'POST', body: repoFd });
+      const upBody = await upRes.json().catch(() => ({}));
+      if (!upRes.ok) throw new Error(upBody.error || `HTTP ${upRes.status}`);
+      jobFd.set('repoVideoId', upBody.id);
+      status.textContent = 'Creating job…';
+    } else {
+      const videoId = form.elements.repoVideo ? form.elements.repoVideo.value : '';
       if (!videoId) throw new Error('choose a repo video first');
-      fd.set('repoVideoId', videoId);
+      jobFd.set('repoVideoId', videoId);
     }
-    const res = await fetch('/api/jobs', { method: 'POST', body: fd });
+    const res = await fetch('/api/jobs', { method: 'POST', body: jobFd });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
-    status.textContent = 'Created job: ' + body.id;
+    // Re-render first: it rebuilds the form (and the status span), so
+    // the confirmation must be written to the fresh element afterwards.
     if (selectedJobType) renderJobForm(selectedJobType);
     loadJobs();
+    const freshStatus = $('#upload-status');
+    if (freshStatus) freshStatus.textContent = 'Created job: ' + body.id;
   } catch (err) {
-    status.textContent = (jobSource === 'repo' ? 'Create failed: ' : 'Upload failed: ') + err.message;
+    status.textContent = 'Create failed: ' + err.message;
   }
 });
 

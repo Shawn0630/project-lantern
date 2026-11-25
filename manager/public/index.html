@@ -21,11 +21,17 @@
     <h2>Jobs</h2>
     <div class="card">
       <h3>New job</h3>
-      <div class="type-picker" id="job-source-picker">
-        <button type="button" class="type-card selected" data-source="upload">Upload file</button>
-        <button type="button" class="type-card" data-source="repo">From repo</button>
+      <div class="picker-row">
+        <span class="picker-label">Job type</span>
+        <div class="seg" id="job-type-picker"></div>
       </div>
-      <div id="job-type-picker" class="type-picker"></div>
+      <div class="picker-row">
+        <span class="picker-label">Video source</span>
+        <div class="seg" id="job-source-picker">
+          <button type="button" class="seg-btn selected" data-source="upload">Upload file</button>
+          <button type="button" class="seg-btn" data-source="repo">From repo</button>
+        </div>
+      </div>
       <form id="upload-form" hidden></form>
     </div>
     <div class="card table-card">
