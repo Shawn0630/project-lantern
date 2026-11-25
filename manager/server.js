@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { Store } from './src/store.js';
+import { migrateLegacyResults } from './src/db.js';
 import { Runner, UNACKED_SWEEP_MS } from './src/pipeline.js';
 import { createRouter } from './src/routes.js';
 
@@ -34,6 +35,17 @@ const PORT = Number(process.env.PORT || 9400);
 const DATA_DIR = process.env.DATA_DIR || path.join(repoRoot, 'data');
 
 const store = new Store(DATA_DIR);
+// One-off import of pre-DB transcribe results into the DB. Safe to
+// run on every boot: the import is idempotent (re-importing a chunk
+// overwrites its rows instead of duplicating them). Jobs whose chunks
+// predate the DB keep working even without this, via the JSON fallback
+// in merge() — the migration just makes the DB complete.
+try {
+  const imported = migrateLegacyResults(store, store.db);
+  if (imported > 0) console.log(`Migrated ${imported} legacy transcribe result(s) into the DB`);
+} catch (e) {
+  console.error('legacy results migration failed (JSON files still work as fallback)', e);
+}
 const runner = new Runner(store);
 
 // Boot-time reconciliation: re-queue assignments orphaned by a manager

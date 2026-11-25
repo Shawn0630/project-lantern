@@ -1,4 +1,8 @@
 // File-based state store (no database). Layout under DATA_DIR:
+//   lantern.db                    — SQLite: per-chunk transcribe results
+//                                    (chunks / segments / chunk_results;
+//                                    see src/db.js). The final SRT is still
+//                                    merged by the manager from this DB.
 //   workers.json                  — worker registry
 //   jobs/<id>/job.json            — job record (config, stages, tasks, logs)
 //   jobs/<id>/input/<name>        — uploaded video
@@ -14,12 +18,18 @@
 //   jobs/<id>/video.mp4 | soft.mp4
 import fs from 'node:fs';
 import path from 'node:path';
+import { LanternDb, DB_FILENAME } from './db.js';
 
 export class Store {
   constructor(dataDir) {
     this.dataDir = dataDir;
     this.jobsDir = path.join(dataDir, 'jobs');
     fs.mkdirSync(this.jobsDir, { recursive: true });
+    // SQLite DB for per-split results (single file, WAL mode).
+    // Every Store instance opens it; the manager is the only process
+    // that ever touches it.
+    this.dbPath = path.join(dataDir, DB_FILENAME);
+    this.db = new LanternDb(this.dbPath);
     this.workersPath = path.join(dataDir, 'workers.json');
     if (!fs.existsSync(this.workersPath)) {
       fs.writeFileSync(this.workersPath, '[]\n');
@@ -81,6 +91,7 @@ export class Store {
 
   deleteJob(id) {
     fs.rmSync(this.jobDir(id), { recursive: true, force: true });
+    this.db.deleteJob(id);
   }
 
   jobFileExists(id, ...parts) {

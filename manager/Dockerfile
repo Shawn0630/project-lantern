@@ -12,4 +12,6 @@ ENV PORT=9400 \
     DATA_DIR=/app/data
 
 EXPOSE 9400
-CMD ["node", "server.js"]
+# --experimental-sqlite enables the built-in node:sqlite module on
+# Node 22 (>= 22.5); on Node 24+ the flag is accepted and unneeded.
+CMD ["node", "--experimental-sqlite", "server.js"]

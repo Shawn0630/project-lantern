@@ -380,9 +380,16 @@ export class Runner {
   async merge(job) {
     const chunks = [];
     for (const chunk of job.chunks) {
-      const resultFile = this.store.jobPath(job.id, 'results', `transcribe_${chunk.index}.json`);
-      const result = this.store.readJson(resultFile, null);
-      chunks.push({ offset: chunk.start, segments: result?.segments || [] });
+      // Primary source: the DB. A chunk with no DB rows (completed
+      // before the DB existed and not yet migrated) falls back to its
+      // legacy JSON result file, so merge stays correct mid-transition.
+      let segments = this.store.db?.getChunkSegments(job.id, chunk.index) ?? null;
+      if (segments === null) {
+        const resultFile = this.store.jobPath(job.id, 'results', `transcribe_${chunk.index}.json`);
+        const result = this.store.readJson(resultFile, null);
+        segments = result?.segments || [];
+      }
+      chunks.push({ offset: chunk.start, segments });
     }
     const merged = mergeChunks(chunks, job.config.overlapSec);
     this.store.writeJsonAtomic(this.store.jobPath(job.id, 'merged.json'), { segments: merged });
@@ -683,11 +690,24 @@ export class Runner {
     if (status === 'done') {
       if (task.type === 'transcribe') {
         if (!result || !Array.isArray(result.segments)) throw new Error('bad transcribe result: missing segments');
+        const chunk = job.chunks[task.chunkIndex];
+        // DB first: it is the source of truth for merge(). If this
+        // throws, nothing is marked done and the task is re-queued
+        // for a retry. The JSON file stays as a dual-write fallback.
+        this.store.db?.saveTranscribeResult({
+          jobId: job.id,
+          chunkIndex: task.chunkIndex,
+          chunkStart: chunk?.start ?? 0,
+          chunkEnd: chunk?.end ?? 0,
+          segments: result.segments,
+          rawResult: result,
+          engine: job.config?.engine ?? null,
+          model: job.config?.model ?? null,
+        });
         this.store.writeJsonAtomic(
           this.store.jobPath(job.id, 'results', `transcribe_${task.chunkIndex}.json`),
           { segments: result.segments },
         );
-        const chunk = job.chunks[task.chunkIndex];
         if (chunk) chunk.state = 'done';
       } else if (task.type === 'burnin') {
         if (!result || !result.file) throw new Error('bad burn-in result: missing file');
