@@ -301,21 +301,25 @@ function fmtWorkerLlm(w) {
 async function loadWorkers() {
   const workers = await api('/api/workers');
   const tbody = $('#workers-table tbody');
-  tbody.innerHTML = workers.map((w) => `<tr>
-    <td>${esc(w.name)}${w.registered ? '' : ' <small>(auto)</small>'}</td>
-    <td>${esc(w.host)}:${esc(w.port)}</td>
-    <td>${esc(w.status)}</td>
-    <td>${fmtAgo(w.lastSeen)}</td>
-    <td>${w.load == null ? '—' : esc(w.load)}</td>
-    <td>${fmtCurrentTask(w.currentTask)}</td>
-    <td>${esc(w.model || '—')}</td>
-    <td>${fmtModels(w.models)}</td>
-    <td>${w.modelPin ? esc(w.modelPin) : '—'}${w.enginePin ? ' / ' + esc(w.enginePin) : ''}</td>
-    <td>${fmtWorkerLlm(w)}</td>
-    <td>${Array.isArray(w.capabilities) ? esc(w.capabilities.join(', ')) : '—'}</td>
-    <td>${esc(fmtStats(w.stats))}</td>
-    <td><button data-settings-worker="${esc(w.id)}">Settings</button> <button data-del-worker="${esc(w.id)}">Delete</button></td>
-  </tr>`).join('') || '<tr><td colspan="13">No workers yet</td></tr>';
+  // 7 columns, two-line cells: every field from the old 13-column table
+  // is still shown, grouped so the table fits its card without scrolling.
+  tbody.innerHTML = workers.map((w) => {
+    const pinParts = [];
+    if (w.modelPin) pinParts.push(`pin: ${esc(w.modelPin)}`);
+    if (w.enginePin) pinParts.push(`engine: ${esc(w.enginePin)}`);
+    const models = fmtModels(w.models);
+    const modelSub = [...pinParts, models === '—' ? null : models].filter(Boolean).join(' · ');
+    const caps = Array.isArray(w.capabilities) && w.capabilities.length ? esc(w.capabilities.join(', ')) : '—';
+    return `<tr>
+    <td data-label="Worker"><span class="cell-main">${esc(w.name)}${w.registered ? '' : ' <small>(auto)</small>'}</span><span class="cell-sub">${esc(w.host)}:${esc(w.port)}</span></td>
+    <td data-label="Status"><span class="cell-main">${esc(w.status)}</span><span class="cell-sub">${fmtAgo(w.lastSeen)}</span></td>
+    <td data-label="Load"><span class="cell-main">${w.load == null ? '—' : esc(w.load)}</span><span class="cell-sub">${fmtCurrentTask(w.currentTask)}</span></td>
+    <td data-label="Model"><span class="cell-main">${esc(w.model || '—')}</span>${modelSub ? `<span class="cell-sub">${modelSub}</span>` : ''}</td>
+    <td data-label="LLM"><span class="cell-main">${fmtWorkerLlm(w)}</span><span class="cell-sub">${caps}</span></td>
+    <td data-label="Resources">${esc(fmtStats(w.stats))}</td>
+    <td><span class="row-actions"><button data-settings-worker="${esc(w.id)}">Settings</button><button data-del-worker="${esc(w.id)}">Delete</button></span></td>
+  </tr>`;
+  }).join('') || '<tr><td colspan="7">No workers yet</td></tr>';
 }
 
 // ---- worker settings: model pin + engine pin + per-worker LLM override ----

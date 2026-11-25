@@ -233,10 +233,39 @@ td .pill { margin-left: 0; }
 /* ---- workers / job detail ---- */
 #worker-form { display: flex; flex-wrap: wrap; gap: 14px; align-items: end; margin: 0; }
 #worker-form label { display: flex; flex-direction: column; font-size: 13px; font-weight: 600; color: var(--muted); gap: 6px; }
-/* Workers table has 13 columns: scroll horizontally inside its card
-   instead of being clipped, and keep every cell on one line. */
-#view-workers .table-card { overflow-x: auto; }
-#workers-table th, #workers-table td { white-space: nowrap; }
+/* Workers table: 7 columns with two-line cells, wrapping instead of
+   scrolling. The old 13-column layout scrolled horizontally inside its
+   card; every field is still shown, grouped under its main value.
+   Fixed layout + explicit widths guarantee the table fits its card;
+   below 760px rows become labelled cards. */
+#workers-table { table-layout: fixed; }
+#workers-table th:nth-child(1) { width: 15%; }
+#workers-table th:nth-child(2) { width: 9%; }
+#workers-table th:nth-child(3) { width: 8%; }
+#workers-table th:nth-child(4) { width: 21%; }
+#workers-table th:nth-child(5) { width: 17%; }
+#workers-table th:nth-child(6) { width: 16%; }
+#workers-table th:nth-child(7) { width: 96px; }
+#workers-table td { vertical-align: top; }
+#workers-table .cell-main { display: block; }
+#workers-table .cell-sub { display: block; color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+#workers-table .row-actions { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+#workers-table .row-actions button { white-space: nowrap; }
+@media (max-width: 760px) {
+  #workers-table thead { display: none; }
+  #workers-table, #workers-table tbody, #workers-table tr, #workers-table td { display: block; width: auto; }
+  #workers-table tr { border-bottom: 1px solid var(--line); padding: 10px 14px; }
+  #workers-table tr:last-child { border-bottom: 0; }
+  #workers-table td { border-bottom: 0; padding: 3px 0; }
+  #workers-table td::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--muted);
+  }
+  #workers-table td:last-child::before { content: none; }
+  #workers-table .row-actions { flex-direction: row; }
+}
 
 pre {
   background: #f6f8fa;
