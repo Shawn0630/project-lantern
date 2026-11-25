@@ -1,8 +1,10 @@
 FROM python:3.12-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
+# fonts-noto-cjk: burn-in renders via libass/fontconfig; without a CJK font,
+# Chinese subtitles come out as tofu boxes. Noto Sans CJK also covers Latin.
 
 WORKDIR /app
 COPY requirements.txt .
