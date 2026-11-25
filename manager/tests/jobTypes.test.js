@@ -21,7 +21,7 @@ test('registry has exactly one enabled type: video-translation', () => {
 test('video-translation fields match the old form, with the same defaults', () => {
   const fields = getJobType('video-translation').fields;
   assert.deepEqual(fields.map((f) => f.key), [
-    'video', 'sourceLang', 'targetLang', 'model', 'chunkMin',
+    'video', 'sourceLang', 'targetLang', 'engine', 'model', 'chunkMin',
     'overlapSec', 'burnChunkMin', 'translate', 'burnIn', 'bilingual',
   ]);
   const byKey = Object.fromEntries(fields.map((f) => [f.key, f]));
@@ -29,6 +29,8 @@ test('video-translation fields match the old form, with the same defaults', () =
   assert.equal(byKey.video.required, true);
   assert.equal(byKey.sourceLang.default, 'auto');
   assert.equal(byKey.targetLang.default, 'zh-CN');
+  assert.equal(byKey.engine.default, 'faster-whisper');
+  assert.deepEqual(byKey.engine.options.map((o) => o.value), ['faster-whisper', 'whisperjav']);
   assert.equal(byKey.model.default, 'large-v3');
   assert.equal(byKey.chunkMin.default, 10);
   assert.equal(byKey.overlapSec.default, 10);
@@ -96,8 +98,9 @@ test('GET /api/job-types returns the video-translation schema', async () => {
     const types = await res.json();
     assert.equal(types.length, 1);
     assert.equal(types[0].id, 'video-translation');
-    assert.equal(types[0].fields.length, 10);
+    assert.equal(types[0].fields.length, 11);
     assert.equal(types[0].fields.find((f) => f.key === 'model').default, 'large-v3');
+    assert.equal(types[0].fields.find((f) => f.key === 'engine').default, 'faster-whisper');
   } finally {
     await srv.stop();
   }

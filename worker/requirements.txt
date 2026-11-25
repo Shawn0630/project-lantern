@@ -1,6 +1,11 @@
 fastapi>=0.110
 uvicorn>=0.29
-faster-whisper>=1.0
+# WhisperJAV pins faster-whisper to a commit (3 commits past the 1.2.1
+# tag: Silero VAD weights v6.2, VAD parameters, dropped download arg)
+# and ctranslate2 to 4.8.3 — use the same pins here so the base install
+# and the WhisperJAV install agree instead of replacing each other.
+faster-whisper @ git+https://github.com/SYSTRAN/faster-whisper.git@ed9a06cd89a93e47838f564998a6c09b655d7f43
+ctranslate2==4.8.3
 requests>=2.31
 psutil>=5.9
 # psutil reports CPU% and memory in the heartbeat stats (see

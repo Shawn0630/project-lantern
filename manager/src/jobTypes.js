@@ -12,6 +12,17 @@
 // A type's `fields` use the same multipart field names the pipeline
 // already expects, so existing job creation is unchanged.
 
+// Transcription engines: the single source of truth for the engine
+// select in the job form, job-config validation, and the per-worker
+// engine pin. faster-whisper is the default; whisperjav is WhisperJAV's
+// stable-ts ASR (its balanced pipeline yields no word timestamps, so it
+// is not offered — see worker/transcribe_core.py).
+export const TRANSCRIPTION_ENGINES = [
+  { value: 'faster-whisper', label: 'faster-whisper' },
+  { value: 'whisperjav', label: 'WhisperJAV' },
+];
+export const DEFAULT_ENGINE = 'faster-whisper';
+
 export const JOB_TYPES = [
   {
     id: 'video-translation',
@@ -42,6 +53,10 @@ export const JOB_TYPES = [
           { value: 'fr', label: 'French' },
           { value: 'de', label: 'German' },
         ],
+      },
+      {
+        key: 'engine', label: 'Transcription engine', kind: 'select', default: 'faster-whisper',
+        options: TRANSCRIPTION_ENGINES,
       },
       {
         key: 'model', label: 'Whisper model', kind: 'select', default: 'large-v3',

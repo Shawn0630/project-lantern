@@ -15,6 +15,7 @@ import { groupSegments, verifyTranslateResult } from './translate.js';
 import { llmConfig, generateText } from './llm.js';
 import { planBurnSegments, shiftSegments } from './burnPlan.js';
 import { probe, extractAudio, splitAudio, listKeyframes, splitVideo, checkConcatCompatible, concatVideos, muxSoft } from './ffmpeg.js';
+import { TRANSCRIPTION_ENGINES, DEFAULT_ENGINE } from './jobTypes.js';
 
 export const STALE_ASSIGNED_MS = 15 * 60 * 1000;
 // Un-acked assignments are re-offered quickly; the 15-minute stale sweep
@@ -119,6 +120,23 @@ export class Runner {
     return worker?.modelPin || null;
   }
 
+  /** Transcription engine a worker is pinned to, or null when unpinned.
+   * Same filter semantics as the model pin: a pinned worker only takes
+   * transcribe tasks whose job asks for its engine. */
+  workerEnginePin(worker) {
+    return worker?.enginePin || null;
+  }
+
+  /** True when the worker can run transcribe tasks for this engine.
+   * Unknown workers are assumed able (back-compat, like workerCanDo);
+   * workers that never reported engines are faster-whisper-only
+   * (pre-1.4 workers predate the whisperjav engine). */
+  workerSupportsEngine(worker, engine) {
+    if (!worker) return true;
+    if (!Array.isArray(worker.engines)) return engine === 'faster-whisper';
+    return worker.engines.includes(engine);
+  }
+
   /** LLM credentials for a claiming worker: a per-worker override wins
    * per field, everything else falls back to the global server/.env
    * config. An unknown worker (null) resolves to the global config,
@@ -192,6 +210,7 @@ export class Runner {
     const config = {
       sourceLang: fields.sourceLang || 'auto',
       targetLang: fields.targetLang || 'zh-CN',
+      engine: fields.engine || DEFAULT_ENGINE,
       model: fields.model || 'large-v3',
       chunkMin: Number(fields.chunkMin || 10),
       overlapSec: Number(fields.overlapSec ?? 10),
@@ -200,6 +219,9 @@ export class Runner {
       burnIn: fields.burnIn !== 'false' && fields.burnIn !== false,
       bilingual: fields.bilingual === 'true' || fields.bilingual === true,
     };
+    if (!TRANSCRIPTION_ENGINES.some((e) => e.value === config.engine)) {
+      throw new Error(`unknown transcription engine: ${config.engine}`);
+    }
     if (!(config.chunkMin >= 0.5 && config.chunkMin <= 120)) throw new Error('chunkMin must be 0.5–120');
     if (!(config.burnChunkMin >= 0.5 && config.burnChunkMin <= 120)) throw new Error('burnChunkMin must be 0.5–120');
     if (!(config.overlapSec >= 0 && config.overlapSec < config.chunkMin * 60)) {
@@ -549,6 +571,10 @@ export class Runner {
     // for that model. The pin is a capability constraint, not a
     // rewrite — the job's model choice is never overridden.
     const pin = type === 'transcribe' ? this.workerModelPin(worker) : null;
+    // Same for the engine pin, and a worker is only offered transcribe
+    // tasks for engines it reports (a pre-1.4 worker reports no engines
+    // and only takes faster-whisper).
+    const enginePin = type === 'transcribe' ? this.workerEnginePin(worker) : null;
     const candidates = [];
     for (const job of this.store.listJobs()) {
       if (!ACTIVE_STAGES.has(job.stage)) continue;
@@ -559,6 +585,11 @@ export class Runner {
         if (task.excludeWorker === workerId &&
             !(task.requeuedAt && now - new Date(task.requeuedAt).getTime() > EXCLUDE_GRACE_MS)) continue;
         if (pin && (job.config.model || 'large-v3') !== pin) continue;
+        if (type === 'transcribe') {
+          const engine = job.config.engine || DEFAULT_ENGINE;
+          if (enginePin && engine !== enginePin) continue;
+          if (!this.workerSupportsEngine(worker, engine)) continue;
+        }
         candidates.push({ job, task, weight: this.effectiveWeight(job, task) });
       }
     }

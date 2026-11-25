@@ -4,7 +4,7 @@ import path from 'node:path';
 import express from 'express';
 import { parseMultipart } from './multipart.js';
 import { newId } from './store.js';
-import { getJobType, listJobTypes } from './jobTypes.js';
+import { getJobType, listJobTypes, TRANSCRIPTION_ENGINES, DEFAULT_ENGINE } from './jobTypes.js';
 
 const DOWNLOADABLE = {
   'source.srt': (job) => job.outputs.sourceSrt,
@@ -57,6 +57,9 @@ export function createRouter(store, runner) {
     return new Set((field?.options || []).map((o) => o.value));
   })();
 
+  // The transcription engines a worker can be pinned to: same pattern.
+  const VALID_ENGINES = new Set(TRANSCRIPTION_ENGINES.map((e) => e.value));
+
   // A worker record as the API may return it: the per-worker LLM key is
   // NEVER sent back — only whether one is set, which model the override
   // uses, and a last-4 hint so the UI can show what is stored.
@@ -106,7 +109,7 @@ export function createRouter(store, runner) {
     return null;
   };
 
-  router.get('/health', (req, res) => res.json({ ok: true, version: '1.3.0' }));
+  router.get('/health', (req, res) => res.json({ ok: true, version: '1.4.0' }));
 
   // Job-type registry: the UI renders the "new job" form from this
   // schema, so a new type is a registry entry, not a UI change.
@@ -318,6 +321,7 @@ export function createRouter(store, runner) {
       load: null,
       model: null,
       modelPin: null,
+      enginePin: null,
       llm: null,
       models: null,
       version: null,
@@ -334,13 +338,15 @@ export function createRouter(store, runner) {
     res.json({ ok: true });
   });
 
-  // Per-worker settings, set from the master: a Whisper model pin and an
-  // LLM override. Both live on the worker record in workers.json and
-  // take effect for tasks claimed afterwards; a task already in flight
-  // keeps the settings it claimed with.
-  //   { modelPin?: string|null, llm?: { apiKey?: string, model?: string } | null }
+  // Per-worker settings, set from the master: a Whisper model pin, a
+  // transcription engine pin, and an LLM override. All live on the worker
+  // record in workers.json and take effect for tasks claimed afterwards;
+  // a task already in flight keeps the settings it claimed with.
+  //   { modelPin?: string|null, enginePin?: string|null, llm?: { apiKey?: string, model?: string } | null }
   // modelPin: null/'' clears the pin; any other value must be a model
   //   the job form offers (400 otherwise). Absent = unchanged.
+  // enginePin: same, against the engine list; a pinned worker only takes
+  //   transcribe tasks whose job asks for its engine.
   // llm: null clears the override. An object applies per field:
   //   apiKey present -> replace ('' clears the key), absent -> keep;
   //   model present -> replace ('' = fall back to the global model),
@@ -356,6 +362,12 @@ export function createRouter(store, runner) {
       if (pin === null || pin === '') worker.modelPin = null;
       else if (typeof pin === 'string' && VALID_MODELS.has(pin)) worker.modelPin = pin;
       else return res.status(400).json({ error: `unknown model: ${String(pin)}` });
+    }
+    if ('enginePin' in body) {
+      const pin = body.enginePin;
+      if (pin === null || pin === '') worker.enginePin = null;
+      else if (typeof pin === 'string' && VALID_ENGINES.has(pin)) worker.enginePin = pin;
+      else return res.status(400).json({ error: `unknown transcription engine: ${String(pin)}` });
     }
     if ('llm' in body) {
       const llm = body.llm;
@@ -381,7 +393,7 @@ export function createRouter(store, runner) {
   });
 
   router.post('/workers/heartbeat', (req, res) => {
-    const { id, bootId, host, port, name, load, model, models, version, capabilities, ffmpeg, stats } = req.body || {};
+    const { id, bootId, host, port, name, load, model, models, engines, version, capabilities, ffmpeg, stats } = req.body || {};
     if (!host || !port) return res.status(400).json({ error: 'host and port are required' });
     const workers = store.listWorkers();
     // Match on the worker-reported stable id first: the same machine
@@ -405,8 +417,10 @@ export function createRouter(store, runner) {
         load: load ?? null,
         model: model || null,
         modelPin: null,
+        enginePin: null,
         llm: null,
         models: sanitizeModels(models),
+        engines: Array.isArray(engines) ? engines.filter((e) => VALID_ENGINES.has(e)) : null,
         version: version || null,
         capabilities: Array.isArray(capabilities) ? capabilities : null,
         ffmpeg: ffmpeg ?? null,
@@ -431,6 +445,10 @@ export function createRouter(store, runner) {
       // Only overwrite the models report when the worker sent one:
       // pre-1.3 workers never send it, and their last report stays.
       if (models !== undefined) worker.models = sanitizeModels(models);
+      // Same for the engines report (pre-1.4 workers never send one).
+      if (engines !== undefined) {
+        worker.engines = Array.isArray(engines) ? engines.filter((e) => VALID_ENGINES.has(e)) : null;
+      }
       if (version) worker.version = version;
       if (name) worker.name = name;
       if (Array.isArray(capabilities)) worker.capabilities = capabilities;
@@ -463,6 +481,7 @@ export function createRouter(store, runner) {
       groupIndex: task.groupIndex ?? null,
       segmentIndex: task.segmentIndex ?? null,
       model: job.config.model,
+      engine: job.config.engine || DEFAULT_ENGINE,
       sourceLang: job.config.sourceLang === 'auto' ? null : job.config.sourceLang,
       inputUrl: `/api/tasks/${task.id}/input`,
       inputKind: input.kind,

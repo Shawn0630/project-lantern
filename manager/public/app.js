@@ -310,7 +310,7 @@ async function loadWorkers() {
     <td>${fmtCurrentTask(w.currentTask)}</td>
     <td>${esc(w.model || '—')}</td>
     <td>${fmtModels(w.models)}</td>
-    <td>${w.modelPin ? esc(w.modelPin) : '—'}</td>
+    <td>${w.modelPin ? esc(w.modelPin) : '—'}${w.enginePin ? ' / ' + esc(w.enginePin) : ''}</td>
     <td>${fmtWorkerLlm(w)}</td>
     <td>${Array.isArray(w.capabilities) ? esc(w.capabilities.join(', ')) : '—'}</td>
     <td>${esc(fmtStats(w.stats))}</td>
@@ -318,10 +318,11 @@ async function loadWorkers() {
   </tr>`).join('') || '<tr><td colspan="13">No workers yet</td></tr>';
 }
 
-// ---- worker settings: model pin + per-worker LLM override ----
-// The pin/model options come from GET /api/job-types (the same list
+// ---- worker settings: model pin + engine pin + per-worker LLM override ----
+// The pin/model/engine options come from GET /api/job-types (the same list
 // the job form offers); the fallback only matters if that fetch fails.
 let modelOptions = null;
+let engineOptions = null;
 let settingsWorkerId = null;
 
 async function ensureModelOptions() {
@@ -338,15 +339,32 @@ async function ensureModelOptions() {
   return modelOptions;
 }
 
+async function ensureEngineOptions() {
+  if (engineOptions) return engineOptions;
+  try {
+    const types = await api('/api/job-types');
+    const type = types.find((t) => t.id === 'video-translation');
+    const field = type && type.fields.find((f) => f.key === 'engine');
+    engineOptions = (field && field.options.map((o) => o.value)) || [];
+  } catch {
+    engineOptions = [];
+  }
+  if (!engineOptions.length) engineOptions = ['faster-whisper', 'whisperjav'];
+  return engineOptions;
+}
+
 async function openWorkerSettings(id) {
   const workers = await api('/api/workers');
   const w = workers.find((x) => x.id === id);
   if (!w) return;
   settingsWorkerId = id;
   const options = await ensureModelOptions();
+  const engineOpts = await ensureEngineOptions();
   $('#worker-settings-name').textContent = w.name;
   $('#worker-settings-pin').innerHTML = '<option value="">(no pin — any model)</option>' +
     options.map((m) => `<option value="${esc(m)}"${w.modelPin === m ? ' selected' : ''}>${esc(m)}</option>`).join('');
+  $('#worker-settings-engine-pin').innerHTML = '<option value="">(no pin — any engine)</option>' +
+    engineOpts.map((e) => `<option value="${esc(e)}"${w.enginePin === e ? ' selected' : ''}>${esc(e)}</option>`).join('');
   $('#worker-settings-llm-model').value = (w.llm && w.llm.model) || '';
   const keyInput = $('#worker-settings-llm-key');
   keyInput.value = '';
@@ -371,6 +389,7 @@ $('#worker-settings-form').addEventListener('submit', async (e) => {
   const llmKey = $('#worker-settings-llm-key').value;
   const body = {
     modelPin: $('#worker-settings-pin').value || null,
+    enginePin: $('#worker-settings-engine-pin').value || null,
     llm: { model: $('#worker-settings-llm-model').value.trim() },
   };
   // The key is only sent when typed: blank keeps the stored one.
@@ -386,7 +405,7 @@ $('#worker-settings-form').addEventListener('submit', async (e) => {
 
 $('#worker-settings-clear-pin').addEventListener('click', async () => {
   try {
-    await saveWorkerSettings({ modelPin: null });
+    await saveWorkerSettings({ modelPin: null, enginePin: null });
     $('#worker-settings-status').textContent = 'Pin cleared';
   } catch (err) {
     $('#worker-settings-status').textContent = 'Clear failed: ' + err.message;
@@ -414,6 +433,7 @@ async function loadJobDetail(id) {
     ['Video source', job.repoVideoId ? `repo (${job.repoVideoId})` : 'upload'],
     ['Target', job.config.targetLang],
     ['Model', job.config.model],
+    ['Engine', job.config.engine || 'faster-whisper'],
     ['Chunk', `${job.config.chunkMin} min / ${job.config.overlapSec}s overlap`],
     ['Burn chunk', `${job.config.burnChunkMin} min`],
     ['Translate', job.config.translate ? 'yes' : 'no'],

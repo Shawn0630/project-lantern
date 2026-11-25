@@ -79,6 +79,7 @@
       <h3>Worker settings — <span id="worker-settings-name"></span></h3>
       <form id="worker-settings-form">
         <label>Model pin <select name="modelPin" id="worker-settings-pin"></select></label>
+        <label>Engine pin <select name="enginePin" id="worker-settings-engine-pin"></select></label>
         <label>LLM model <input type="text" name="llmModel" id="worker-settings-llm-model" placeholder="global model"></label>
         <label>LLM API key <input type="password" name="llmApiKey" id="worker-settings-llm-key" placeholder="leave blank to keep"></label>
         <button type="submit">Save settings</button>
@@ -86,7 +87,7 @@
         <button type="button" id="worker-settings-reset-llm">Reset LLM to global</button>
         <span id="worker-settings-status"></span>
       </form>
-      <small>Pin: this worker only takes transcribe tasks for the pinned model (a task already running keeps its model). LLM: per-worker key/model — blank fields fall back to the global server settings. The key is never shown back; leave it blank to keep the stored one.</small>
+      <small>Pin: this worker only takes transcribe tasks for the pinned model and engine (a task already running keeps its model and engine). LLM: per-worker key/model — blank fields fall back to the global server settings. The key is never shown back; leave it blank to keep the stored one.</small>
     </div>
   </section>
 

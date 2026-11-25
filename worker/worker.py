@@ -37,7 +37,6 @@ import logging
 import os
 import shutil
 import socket
-import subprocess
 import tempfile
 import threading
 import time
@@ -50,11 +49,18 @@ import uvicorn
 
 from gemini import translate_lines
 import burnin
+from transcribe_core import (
+    DEFAULT_ENGINE,
+    ENGINES,
+    is_engine_available,
+    loaded_faster_whisper_models,
+    transcribe_file,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("lantern-worker")
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 MANAGER_URL = os.environ.get("MANAGER_URL", "").rstrip("/")
 WORKER_PORT = int(os.environ.get("WORKER_PORT", "9500"))
 WORKER_HOST = os.environ.get("WORKER_HOST", socket.gethostname())
@@ -116,18 +122,16 @@ def info():
     return {"worker_id": WORKER_ID, "name": WORKER_NAME, "host": WORKER_HOST, "port": WORKER_PORT}
 
 
-# ---- faster-whisper (lazy import so --help/health work without the model stack) ----
-_model_cache = {}
+# ---- transcription core (faster-whisper + WhisperJAV; see transcribe_core.py) ----
+# Model loading/decoding lives in transcribe_core; this module keeps the
+# heartbeat's view of it (loaded faster-whisper models + engines offered).
 
 
-def get_model(model_name: str):
-    if model_name not in _model_cache:
-        from faster_whisper import WhisperModel
-
-        log.info("Loading faster-whisper model %s (CPU, int8)", model_name)
-        _model_cache[model_name] = WhisperModel(model_name, device="cpu", compute_type="int8")
-        _state["model"] = model_name
-    return _model_cache[model_name]
+def engines_report():
+    """Transcription engines this worker can run. faster-whisper is always
+    available; whisperjav only when the WhisperJAV package imports
+    (checked once, cached in transcribe_core)."""
+    return [e for e in ENGINES if is_engine_available(e)]
 
 
 # Known faster-whisper model repos (mirrors faster_whisper.utils._MODELS):
@@ -170,7 +174,7 @@ def list_downloaded_models():
     snapshot (model.bin present — huggingface_hub only moves the file
     into place once fully downloaded). Never raises: the heartbeat
     must survive a broken cache dir."""
-    found = set(_model_cache)
+    found = set(loaded_faster_whisper_models())
     try:
         hub = hf_hub_dir()
         if hub.is_dir():
@@ -194,42 +198,6 @@ def list_downloaded_models():
 def models_report():
     """Heartbeat/health view of this worker's models."""
     return {"loaded": _state["model"], "available": list_downloaded_models()}
-
-
-def decode_audio_ffmpeg(path: str):
-    """Decode audio to 16 kHz mono float32 via ffmpeg.
-
-    faster-whisper decodes through PyAV, but faster-whisper 1.2.1 passes
-    ``metadata_errors=`` to ``av.open()``, which PyAV removed in 15.0 —
-    so decoding here keeps the worker working with any PyAV version.
-    """
-    import numpy as np
-
-    proc = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", path, "-ac", "1", "-ar", "16000", "-f", "f32le", "-"],
-        capture_output=True,
-        check=True,
-    )
-    return np.frombuffer(proc.stdout, dtype=np.float32)
-
-
-def transcribe_file(path: str, model_name: str, language):
-    """Transcribe an audio file; returns chunk-relative segments with word times."""
-    model = get_model(model_name)
-    audio = decode_audio_ffmpeg(path)
-    segments, _info = model.transcribe(audio, language=language, word_timestamps=True, beam_size=5)
-    out = []
-    for seg in segments:
-        words = []
-        for w in seg.words or []:
-            words.append({"text": w.word.strip(), "start": float(w.start), "end": float(w.end)})
-        out.append({
-            "text": seg.text.strip(),
-            "start": float(seg.start),
-            "end": float(seg.end),
-            "words": words,
-        })
-    return out
 
 
 def capabilities():
@@ -291,6 +259,7 @@ def heartbeat():
             "load": 1 if _state["current_task"] else 0,
             "model": _state["model"] or DEFAULT_MODEL,
             "models": models_report(),
+            "engines": engines_report(),
             "version": VERSION,
             "capabilities": capabilities(),
             "ffmpeg": shutil.which("ffmpeg") is not None,
@@ -451,8 +420,11 @@ def run_transcribe(task):
     kind, data = download_input(task)
     assert kind == "file"
     try:
-        segments = transcribe_file(data, task.get("model") or DEFAULT_MODEL, task.get("sourceLang"))
-        log.info("transcribed task %s: %d segments", task["taskId"], len(segments))
+        model = task.get("model") or DEFAULT_MODEL
+        engine = task.get("engine") or DEFAULT_ENGINE
+        segments = transcribe_file(data, model, task.get("sourceLang"), engine=engine)
+        _state["model"] = model
+        log.info("transcribed task %s: %d segments (engine=%s)", task["taskId"], len(segments), engine)
         report_result(task["taskId"], "done", {"segments": segments})
     finally:
         try:

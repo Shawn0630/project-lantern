@@ -337,6 +337,54 @@ test('an unpinned worker takes any model', () => {
   assert.equal(r.claimTask('transcribe', 'w1').task.id, 't1');
 });
 
+// ---- transcription engine (job config + per-worker engine pin + capability) ----
+test('buildJobConfig stores the engine with faster-whisper default and validates it', () => {
+  const r = runner([], []);
+  assert.equal(r.buildJobConfig({}).engine, 'faster-whisper');
+  assert.equal(r.buildJobConfig({ engine: 'whisperjav' }).engine, 'whisperjav');
+  assert.throws(() => r.buildJobConfig({ engine: 'nope' }), /unknown transcription engine: nope/);
+});
+
+test('an engine-pinned worker only takes transcribe tasks for its engine', () => {
+  const mk = (jobId, engine, taskId) => {
+    const job = makeJob(jobId, 'transcribing', [makeTask(taskId, 'transcribe')]);
+    job.config = { engine, model: 'large-v3' };
+    return job;
+  };
+  const jobs = [mk('j1', 'faster-whisper', 't1'), mk('j2', 'whisperjav', 't2')];
+  const pinned = runner(jobs, [makeWorker('w1', { enginePin: 'whisperjav', engines: ['faster-whisper', 'whisperjav'] })]);
+  assert.equal(pinned.claimTask('transcribe', 'w1').task.id, 't2');
+  // A worker pinned to an engine no queued job uses waits.
+  const waiting = runner([mk('j3', 'faster-whisper', 't3')], [makeWorker('w2', { enginePin: 'whisperjav', engines: ['faster-whisper', 'whisperjav'] })]);
+  assert.equal(waiting.claimTask('transcribe', 'w2'), null);
+  // The engine pin does not gate other task kinds.
+  const translateJob = makeJob('j4', 'translating', [makeTask('t4', 'translate')]);
+  const r2 = runner([translateJob], [makeWorker('w3', { enginePin: 'whisperjav', engines: ['faster-whisper', 'whisperjav'] })], { LLM_API_KEY: 'g-key' });
+  assert.equal(r2.claimTask('translate', 'w3').task.id, 't4');
+});
+
+test('claimTask only offers a whisperjav job to workers that report the engine', () => {
+  const mk = (jobId, engine, taskId) => {
+    const job = makeJob(jobId, 'transcribing', [makeTask(taskId, 'transcribe')]);
+    job.config = { engine, model: 'large-v3' };
+    return job;
+  };
+  // A worker that only reports faster-whisper never gets a whisperjav job.
+  const fwOnly = runner([mk('j1', 'whisperjav', 't1')], [makeWorker('w1', { engines: ['faster-whisper'] })]);
+  assert.equal(fwOnly.claimTask('transcribe', 'w1'), null);
+  // A worker that reports both engines gets it.
+  const both = runner([mk('j2', 'whisperjav', 't2')], [makeWorker('w2', { engines: ['faster-whisper', 'whisperjav'] })]);
+  assert.equal(both.claimTask('transcribe', 'w2').task.id, 't2');
+  // A worker that never reported engines is faster-whisper-only (pre-1.4).
+  const legacy = runner([mk('j3', 'whisperjav', 't3')], [makeWorker('w3')]);
+  assert.equal(legacy.claimTask('transcribe', 'w3'), null);
+  const legacyFw = runner([mk('j4', 'faster-whisper', 't4')], [makeWorker('w4')]);
+  assert.equal(legacyFw.claimTask('transcribe', 'w4').task.id, 't4');
+  // An unknown worker is offered everything (back-compat, like workerCanDo).
+  const unknown = runner([mk('j5', 'whisperjav', 't5')], []);
+  assert.equal(unknown.claimTask('transcribe', 'nobody').task.id, 't5');
+});
+
 // ---- per-worker LLM ----
 test('workerLlm resolves per field with global fallback', () => {
   const r = runner([], [], { LLM_API_KEY: 'g-key', LLM_MODEL: 'gemini-2.5-flash' });

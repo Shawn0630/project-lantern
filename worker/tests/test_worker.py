@@ -319,7 +319,9 @@ def test_list_downloaded_models_empty_without_cache(monkeypatch, tmp_path):
 
 def test_list_downloaded_models_includes_loaded_models(monkeypatch, tmp_path):
     monkeypatch.setenv("HF_HOME", str(tmp_path))
-    monkeypatch.setitem(worker_mod._model_cache, "tiny", object())
+    import transcribe_core
+
+    monkeypatch.setitem(transcribe_core._fw_model_cache, "tiny", object())
     assert worker_mod.list_downloaded_models() == ["tiny"]
 
 

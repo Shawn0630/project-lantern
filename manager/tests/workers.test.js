@@ -181,6 +181,40 @@ test('heartbeat stores the worker models report', async () => {
   });
 });
 
+test('heartbeat stores the worker engines report', async () => {
+  const store = fakeStore([]);
+  await withServer(store, {}, async (port) => {
+    await heartbeat(port, hb('stable-1', 'aaa111aaaaaa', {
+      engines: ['faster-whisper', 'whisperjav'],
+    }));
+    const workers = await getWorkers(port);
+    assert.deepEqual(workers[0].engines, ['faster-whisper', 'whisperjav']);
+    // An unknown engine name is filtered out; a heartbeat without an
+    // engines report leaves the last report in place.
+    await heartbeat(port, hb('stable-1', 'aaa111aaaaaa', { engines: ['faster-whisper', 'nope'] }));
+    assert.deepEqual((await getWorkers(port))[0].engines, ['faster-whisper']);
+    await heartbeat(port, hb('stable-1', 'aaa111aaaaaa'));
+    assert.deepEqual((await getWorkers(port))[0].engines, ['faster-whisper']);
+  });
+});
+
+test('POST /workers/:id/settings pins an engine and validates it', async () => {
+  const store = fakeStore([]);
+  await withServer(store, {}, async (port) => {
+    await heartbeat(port, hb('stable-1', 'aaa111aaaaaa'));
+    const id = await firstWorkerId(port);
+    const pinned = await postSettings(port, id, { enginePin: 'whisperjav' });
+    assert.equal(pinned.enginePin, 'whisperjav');
+    await postSettings(port, id, { enginePin: 'not-an-engine' }, 400);
+    const cleared = await postSettings(port, id, { enginePin: null });
+    assert.equal(cleared.enginePin, null);
+    // The model pin and engine pin are independent.
+    const both = await postSettings(port, id, { modelPin: 'large-v3', enginePin: 'whisperjav' });
+    assert.equal(both.modelPin, 'large-v3');
+    assert.equal(both.enginePin, 'whisperjav');
+  });
+});
+
 test('POST /workers/:id/settings pins a model and validates it', async () => {
   const store = fakeStore([]);
   await withServer(store, {}, async (port) => {
