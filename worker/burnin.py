@@ -62,14 +62,17 @@ def check_matches(actual, expected, what):
         raise RuntimeError(f"{what} has fps {actual['fps']}, expected {want_fps}")
 
 
-def build_burnin_cmd(segment_path, ass_path, out_path, trim_start, duration, crf=CRF_DEFAULT, audio_bitrate=None, has_audio=True):
+def build_burnin_cmd(segment_path, ass_path, out_path, trim_start, duration, crf=CRF_DEFAULT, audio_bitrate=None, has_audio=True, audio_copy=False):
     """Build the ffmpeg burn-in command.
 
     -ss before -i trims the keyframe-overshoot the manager's stream-copy cut
     left at the head of the segment; the re-encode makes the trim
-    frame-accurate. -t limits the output to the segment duration. Audio is
-    re-encoded to AAC (never stream-copied, because the trim needs
-    frame-accurate audio); when the segment has no audio stream, -an is used.
+    frame-accurate. -t limits the output to the segment duration (omit it
+    by passing duration=None: the whole input is encoded). Audio is
+    re-encoded to AAC by default (never stream-copied, because the trim
+    needs frame-accurate audio); pass audio_copy=True to stream-copy the
+    source audio instead — only correct with no trim, i.e. the whole-video
+    burn. When the input has no audio stream, -an is used either way.
     No resolution or frame-rate flags: the output keeps the input's.
     Pixel format is forced to 8-bit yuv420p so a 10-bit/HDR source does
     not produce High 10 output that stock players cannot decode.
@@ -82,10 +85,15 @@ def build_burnin_cmd(segment_path, ass_path, out_path, trim_start, duration, crf
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", str(crf),
     ]
     if has_audio:
-        cmd += ["-c:a", "aac", "-b:a", str(audio_bitrate or 128000)]
+        if audio_copy:
+            cmd += ["-c:a", "copy"]
+        else:
+            cmd += ["-c:a", "aac", "-b:a", str(audio_bitrate or 128000)]
     else:
         cmd += ["-an"]
-    cmd += ["-t", str(duration), out_path]
+    if duration is not None:
+        cmd += ["-t", str(duration)]
+    cmd += [out_path]
     return cmd
 
 
@@ -116,4 +124,44 @@ def burnin_segment(segment_path, ass_path, out_path, payload):
     subprocess.run(cmd, capture_output=True, text=True, check=True)
     out_info = probe_video(out_path)
     check_matches(out_info, expected, "burned segment")
+    return out_path
+
+
+def burnin_full(video_path, ass_path, out_path, payload):
+    """Burn the merged subtitles into the whole video in one pass.
+
+    Unlike burnin_segment there is no trim: the input is the original
+    video, so the full duration is encoded (no -t) and the audio is
+    stream-copied instead of re-encoded to AAC — no trim means no
+    frame-accurate audio work is needed, so copying is lossless and
+    faster. (Same assumption the manager's muxSoft already makes for
+    soft.mp4: the source audio must be MP4-compatible, e.g. AAC — an
+    incompatible codec fails the encode loudly instead of silently
+    producing an unplayable file.) Video uses the same libx264 /
+    yuv420p / CRF 20 encode as segmented burn-in. Probes the input
+    video and the encoded output against the payload's stated
+    properties; raises on any mismatch. Returns the output path.
+    """
+    expected = {
+        "videoCodec": payload.get("videoCodec"),
+        "fps": payload.get("fps"),
+        "width": payload.get("width"),
+        "height": payload.get("height"),
+    }
+    info = probe_video(video_path)
+    check_matches(info, expected, "final burn-in input video")
+    cmd = build_burnin_cmd(
+        video_path,
+        ass_path,
+        out_path,
+        trim_start=0,
+        duration=None,
+        crf=payload.get("crf", CRF_DEFAULT),
+        audio_bitrate=None,
+        has_audio=info.get("has_audio", True),
+        audio_copy=True,
+    )
+    subprocess.run(cmd, capture_output=True, text=True, check=True)
+    out_info = probe_video(out_path)
+    check_matches(out_info, expected, "burned video")
     return out_path

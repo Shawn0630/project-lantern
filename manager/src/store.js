@@ -13,7 +13,9 @@
 //   jobs/<id>/results/transcribe_<i>.json | translate_<i>.json
 //   jobs/<id>/merged.json | resegmented.json | translated.json
 //   jobs/<id>/burn/seg_000.mp4 | ass_000.ass   — burn-in segment video + ASS
+//   jobs/<id>/burn/final.ass                 — total ASS for final burn-in
 //   jobs/<id>/results/burnin_<i>.mp4          — worker-burned segments
+//   jobs/<id>/results/final-burnin.mp4        — worker-burned whole video (final mode)
 //   jobs/<id>/source.srt | translated.srt | bilingual.srt
 //   jobs/<id>/video.mp4 | soft.mp4
 import fs from 'node:fs';

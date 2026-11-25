@@ -165,8 +165,8 @@ test('sweepUnacked leaves acked tasks and unexpired assignments alone', () => {
 });
 
 // ---- per-stage retry budgets ----
-test('retry budgets are per stage: transcribe 2, translate 3, burnin 1', () => {
-  assert.deepEqual(RETRY_BUDGET, { transcribe: 2, translate: 3, burnin: 1 });
+test('retry budgets are per stage: transcribe 2, translate 3, burnin 1, final-burnin 1', () => {
+  assert.deepEqual(RETRY_BUDGET, { transcribe: 2, translate: 3, burnin: 1, 'final-burnin': 1 });
 });
 
 function failNTimes(r, job, task, n, workerPrefix = 'w') {

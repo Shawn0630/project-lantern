@@ -201,10 +201,14 @@ def models_report():
 
 
 def capabilities():
-    """Task kinds this worker can do. Burn-in needs ffmpeg on PATH."""
+    """Task kinds this worker can do. Burn-in needs ffmpeg on PATH.
+    final-burnin is the same ffmpeg capability as burnin, listed
+    separately so the manager only offers it to workers that run
+    this version (older workers never claim the new task type)."""
     caps = ["transcribe", "translate"]
     if shutil.which("ffmpeg"):
         caps.append("burnin")
+        caps.append("final-burnin")
     return caps
 
 
@@ -396,6 +400,33 @@ def upload_result_file(task_id, path):
         raise RuntimeError(f"result upload rejected: {resp.status_code} {resp.text[:200]}")
 
 
+def run_final_burnin(task):
+    """Burn the merged subtitles into the whole video in one pass.
+
+    Same shape as run_burnin (JSON payload, download video + ASS,
+    upload the finished file), but the input is the original video and
+    the ASS covers the whole timeline, so the worker encodes the full
+    duration — no trim, no -t — and stream-copies the audio.
+    """
+    kind, payload = download_input(task)
+    assert kind == "json"
+    video_path = download_url(payload["videoUrl"], ".mp4")
+    ass_path = download_url(payload["assUrl"], ".ass")
+    out_path = None
+    try:
+        out_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+        burnin.burnin_full(video_path, ass_path, out_path, payload)
+        log.info("burned task %s: whole video", task["taskId"])
+        upload_result_file(task["taskId"], out_path)
+    finally:
+        for p in (video_path, ass_path, out_path):
+            if p:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+
 def run_burnin(task):
     kind, payload = download_input(task)
     assert kind == "json"
@@ -458,7 +489,7 @@ def poll_loop():
     log.info("worker %s polling %s", WORKER_ID, MANAGER_URL)
     while True:
         try:
-            task = claim("transcribe") or claim("translate") or claim("burnin")
+            task = claim("transcribe") or claim("translate") or claim("burnin") or claim("final-burnin")
             if not task:
                 time.sleep(POLL_INTERVAL)
                 continue
@@ -470,6 +501,8 @@ def poll_loop():
                     run_translate(task)
                 elif task["type"] == "burnin":
                     run_burnin(task)
+                elif task["type"] == "final-burnin":
+                    run_final_burnin(task)
                 else:
                     report_result(task["taskId"], "failed", error=f"unknown task type {task['type']}")
             except Exception as e:  # noqa: BLE001 - a task failure must not kill the loop

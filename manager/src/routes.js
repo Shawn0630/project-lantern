@@ -465,8 +465,8 @@ export function createRouter(store, runner) {
   // ---- tasks (worker-pull) ----
   router.get('/tasks/next', (req, res) => {
     const { type, workerId } = req.query;
-    if (type !== 'transcribe' && type !== 'translate' && type !== 'burnin') {
-      return res.status(400).json({ error: 'type must be transcribe, translate or burnin' });
+    if (type !== 'transcribe' && type !== 'translate' && type !== 'burnin' && type !== 'final-burnin') {
+      return res.status(400).json({ error: 'type must be transcribe, translate, burnin or final-burnin' });
     }
     if (!workerId) return res.status(400).json({ error: 'workerId is required' });
     const claimed = runner.claimTask(type, String(workerId));
@@ -513,10 +513,17 @@ export function createRouter(store, runner) {
     if (input.kind === 'file') {
       if (!fs.existsSync(input.path)) return res.status(404).json({ error: 'task file missing' });
       res.download(input.path, input.filename);
-    } else if (task.type === 'burnin' && req.query.part) {
-      // Burn-in tasks fetch their two inputs separately.
-      const seg = job.burnSegments[task.segmentIndex];
-      const rel = req.query.part === 'video' ? seg?.file : req.query.part === 'ass' ? seg?.assFile : null;
+    } else if ((task.type === 'burnin' || task.type === 'final-burnin') && req.query.part) {
+      // Burn-in tasks fetch their two inputs separately. Segmented
+      // burn-in gets its cut segment + per-segment ASS; final burn-in
+      // gets the ORIGINAL video + the total ASS.
+      let rel = null;
+      if (task.type === 'burnin') {
+        const seg = job.burnSegments[task.segmentIndex];
+        rel = req.query.part === 'video' ? seg?.file : req.query.part === 'ass' ? seg?.assFile : null;
+      } else {
+        rel = req.query.part === 'video' ? job.inputFile : req.query.part === 'ass' ? job.finalAssFile : null;
+      }
       if (!rel) return res.status(400).json({ error: 'part must be video or ass' });
       const file = store.jobPath(job.id, rel);
       if (!fs.existsSync(file)) return res.status(404).json({ error: 'task file missing' });
@@ -547,14 +554,15 @@ export function createRouter(store, runner) {
     res.json({ ok: true });
   });
 
-  // Burn-in result upload: the encoded segment is a file, too large for the
+  // Burn-in result upload: the encoded video is a file, too large for the
   // JSON result endpoint. The worker posts multipart form-data with the file
-  // in field "file" plus text fields workerId / status.
+  // in field "file" plus text fields workerId / status. Segmented burn-in
+  // uploads burnin_<i>.mp4; final burn-in uploads final-burnin.mp4.
   router.post('/tasks/:id/result-file', async (req, res) => {
     const found = findTask(req.params.id);
     if (!found) return res.status(404).json({ error: 'task not found' });
     const { job, task } = found;
-    if (task.type !== 'burnin') return res.status(400).json({ error: 'result-file is only for burn-in tasks' });
+    if (task.type !== 'burnin' && task.type !== 'final-burnin') return res.status(400).json({ error: 'result-file is only for burn-in tasks' });
     if (task.state !== 'assigned') return res.status(409).json({ error: 'task is not assigned' });
     const ct = req.headers['content-type'] || '';
     const m = /multipart\/form-data;\s*boundary=(?:"([^"]+)"|([^;]+))/.exec(ct);
@@ -562,7 +570,7 @@ export function createRouter(store, runner) {
     const boundary = (m[1] || m[2]).trim();
     const resultsDir = store.jobPath(job.id, 'results');
     fs.mkdirSync(resultsDir, { recursive: true });
-    const finalName = `burnin_${task.segmentIndex}.mp4`;
+    const finalName = task.type === 'final-burnin' ? 'final-burnin.mp4' : `burnin_${task.segmentIndex}.mp4`;
     const tmpPath = path.join(resultsDir, finalName + '.tmp');
     try {
       const { fields, files } = await parseMultipart(req, boundary, (fieldname) => {

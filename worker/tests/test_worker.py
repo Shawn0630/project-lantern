@@ -398,3 +398,54 @@ def test_download_repo_video_raises_on_http_error(monkeypatch, tmp_path):
     monkeypatch.setattr(worker_mod.requests, "get", fake_get)
     with pytest.raises(RuntimeError, match="HTTP 404"):
         worker_mod.download_repo_video("video_nope", tmp_path / "clip.mp4")
+
+
+def test_capabilities_include_final_burnin_when_ffmpeg_present():
+    caps = worker_mod.capabilities()
+    assert ("final-burnin" in caps) == (shutil.which("ffmpeg") is not None)
+    # final-burnin rides the same ffmpeg capability as burnin.
+    assert ("final-burnin" in caps) == ("burnin" in caps)
+
+
+def test_run_final_burnin_downloads_uploads_and_cleans_up(monkeypatch, tmp_path):
+    """run_final_burnin: JSON payload -> download video+ASS -> burnin_full
+    (whole video) -> upload result file; temp files removed afterwards."""
+    import os
+
+    payload = {
+        "taskId": "task_fb",
+        "type": "final-burnin",
+        "videoUrl": "/api/tasks/task_fb/input?part=video",
+        "assUrl": "/api/tasks/task_fb/input?part=ass",
+        "duration": 67.2,
+        "crf": 20,
+        "fps": 30, "width": 640, "height": 360,
+        "videoCodec": "h264", "audioBitrate": 128000,
+    }
+    video_file = tmp_path / "clip.mp4"
+    ass_file = tmp_path / "final.ass"
+    video_file.write_bytes(b"fake video")
+    ass_file.write_text("fake ass")
+    downloads = [str(video_file), str(ass_file)]
+    calls = {}
+
+    monkeypatch.setattr(worker_mod, "download_input", lambda task: ("json", payload))
+    monkeypatch.setattr(worker_mod, "download_url", lambda url, suffix: downloads.pop(0))
+    def fake_burnin_full(video_path, ass_path, out_path, p):
+        calls["burnin_full"] = (video_path, ass_path, out_path, p)
+    monkeypatch.setattr(worker_mod.burnin, "burnin_full", fake_burnin_full)
+    def fake_upload(task_id, path):
+        calls["upload"] = (task_id, path)
+    monkeypatch.setattr(worker_mod, "upload_result_file", fake_upload)
+
+    worker_mod.run_final_burnin({"taskId": "task_fb", "type": "final-burnin"})
+
+    assert calls["burnin_full"][0] == str(video_file)
+    assert calls["burnin_full"][1] == str(ass_file)
+    assert calls["burnin_full"][3] is payload
+    assert calls["upload"][0] == "task_fb"
+    assert calls["upload"][1] == calls["burnin_full"][2]
+    # The downloaded inputs and the temp output are removed afterwards.
+    assert not os.path.exists(str(video_file))
+    assert not os.path.exists(str(ass_file))
+    assert not os.path.exists(calls["upload"][1])

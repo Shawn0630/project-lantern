@@ -22,7 +22,7 @@ test('video-translation fields match the old form, with the same defaults', () =
   const fields = getJobType('video-translation').fields;
   assert.deepEqual(fields.map((f) => f.key), [
     'video', 'sourceLang', 'targetLang', 'engine', 'model', 'chunkMin',
-    'overlapSec', 'burnChunkMin', 'translate', 'burnIn', 'bilingual',
+    'overlapSec', 'burnChunkMin', 'burnMode', 'translate', 'burnIn', 'bilingual',
   ]);
   const byKey = Object.fromEntries(fields.map((f) => [f.key, f]));
   assert.equal(byKey.video.kind, 'file');
@@ -35,6 +35,8 @@ test('video-translation fields match the old form, with the same defaults', () =
   assert.equal(byKey.chunkMin.default, 10);
   assert.equal(byKey.overlapSec.default, 10);
   assert.equal(byKey.burnChunkMin.default, 5);
+  assert.equal(byKey.burnMode.default, 'segmented');
+  assert.deepEqual(byKey.burnMode.options.map((o) => o.value), ['segmented', 'final']);
   assert.equal(byKey.translate.default, true);
   assert.equal(byKey.burnIn.default, true);
   assert.equal(byKey.bilingual.default, false);
@@ -98,9 +100,10 @@ test('GET /api/job-types returns the video-translation schema', async () => {
     const types = await res.json();
     assert.equal(types.length, 1);
     assert.equal(types[0].id, 'video-translation');
-    assert.equal(types[0].fields.length, 11);
+    assert.equal(types[0].fields.length, 12);
     assert.equal(types[0].fields.find((f) => f.key === 'model').default, 'large-v3');
     assert.equal(types[0].fields.find((f) => f.key === 'engine').default, 'faster-whisper');
+    assert.equal(types[0].fields.find((f) => f.key === 'burnMode').default, 'segmented');
   } finally {
     await srv.stop();
   }

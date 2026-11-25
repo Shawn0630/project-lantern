@@ -126,6 +126,28 @@ PAYLOAD = {
 }
 
 
+def test_build_burnin_cmd_audio_copy_stream_copies():
+    cmd = burnin.build_burnin_cmd("seg.mp4", "a.ass", "out.mp4", 0, 10, audio_copy=True)
+    assert cmd[cmd.index("-c:a") + 1] == "copy"
+    assert "-b:a" not in cmd
+    assert "aac" not in cmd
+    assert cmd[cmd.index("-t") + 1] == "10"
+
+
+def test_build_burnin_cmd_no_duration_omits_t():
+    cmd = burnin.build_burnin_cmd("v.mp4", "a.ass", "out.mp4", 0, None)
+    assert "-t" not in cmd
+    assert cmd[-1] == "out.mp4"
+    # -ss 0 is kept: input seek at the start is a no-op.
+    assert cmd[cmd.index("-ss") + 1] == "0"
+
+
+def test_build_burnin_cmd_audio_copy_still_honors_no_audio():
+    cmd = burnin.build_burnin_cmd("v.mp4", "a.ass", "out.mp4", 0, None, has_audio=False, audio_copy=True)
+    assert "-an" in cmd
+    assert "-c:a" not in cmd
+
+
 def test_burnin_segment_flow_mocked():
     fake_run, calls = _fake_run_factory()
     with mock.patch.object(burnin.subprocess, "run", side_effect=fake_run):
@@ -158,3 +180,51 @@ def test_burnin_segment_input_mismatch_raises():
     with mock.patch.object(burnin.subprocess, "run", side_effect=fake_run):
         with pytest.raises(RuntimeError, match="width 320"):
             burnin.burnin_segment("seg.mp4", "a.ass", "out.mp4", PAYLOAD)
+
+
+FULL_PAYLOAD = {
+    "crf": 20,
+    "fps": 30, "width": 640, "height": 360,
+    "videoCodec": "h264", "audioBitrate": 128000,
+}
+
+
+def test_burnin_full_flow_mocked():
+    """Whole-video burn: no -t (full duration), audio stream-copied."""
+    fake_run, calls = _fake_run_factory()
+    with mock.patch.object(burnin.subprocess, "run", side_effect=fake_run):
+        out = burnin.burnin_full("video.mp4", "full.ass", "out.mp4", FULL_PAYLOAD)
+    assert out == "out.mp4"
+    ffmpeg_calls = [c for c in calls if c[0] == "ffmpeg"]
+    assert len(ffmpeg_calls) == 1
+    cmd = ffmpeg_calls[0]
+    assert "-t" not in cmd
+    assert cmd[cmd.index("-c:a") + 1] == "copy"
+    assert "-b:a" not in cmd
+    assert "libx264" in cmd and cmd[cmd.index("-crf") + 1] == "20"
+    assert cmd[cmd.index("-pix_fmt") + 1] == "yuv420p"
+    vf = cmd[cmd.index("-vf") + 1]
+    assert vf.startswith("subtitles='") and "full.ass" in vf
+    assert len([c for c in calls if c[0] == "ffprobe"]) == 2  # input + output
+
+
+def test_burnin_full_output_mismatch_raises():
+    fake_run, _calls = _fake_run_factory(output_fps="25/1")
+    with mock.patch.object(burnin.subprocess, "run", side_effect=fake_run):
+        with pytest.raises(RuntimeError, match="fps 25"):
+            burnin.burnin_full("video.mp4", "full.ass", "out.mp4", FULL_PAYLOAD)
+
+
+def test_burnin_full_input_mismatch_raises():
+    def fake_run(cmd, **kw):
+        m = mock.Mock()
+        if cmd[0] == "ffprobe":
+            m.stdout = json.dumps({"streams": [
+                {"codec_type": "video", "codec_name": "h264", "width": 320, "height": 360, "avg_frame_rate": "30/1"},
+                {"codec_type": "audio", "codec_name": "aac", "bit_rate": "128000"},
+            ]})
+        return m
+
+    with mock.patch.object(burnin.subprocess, "run", side_effect=fake_run):
+        with pytest.raises(RuntimeError, match="width 320"):
+            burnin.burnin_full("video.mp4", "full.ass", "out.mp4", FULL_PAYLOAD)

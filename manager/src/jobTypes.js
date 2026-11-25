@@ -23,6 +23,17 @@ export const TRANSCRIPTION_ENGINES = [
 ];
 export const DEFAULT_ENGINE = 'faster-whisper';
 
+// Burn-in mode: how subtitles are burned into the video. Segmented
+// (default) burns ~burnChunkMin pieces in parallel across workers and
+// concatenates them; final burns the merged SRT into the whole video in
+// one pass on a single worker — simpler, no segment boundaries, but no
+// parallelism. burnChunkMin is ignored in final mode.
+export const BURN_MODES = [
+  { value: 'segmented', label: 'Segmented (parallel)' },
+  { value: 'final', label: 'Whole video (single pass)' },
+];
+export const DEFAULT_BURN_MODE = 'segmented';
+
 export const JOB_TYPES = [
   {
     id: 'video-translation',
@@ -72,6 +83,10 @@ export const JOB_TYPES = [
       { key: 'chunkMin', label: 'Chunk minutes', kind: 'number', default: 10, min: 0.5, max: 120, step: 0.5 },
       { key: 'overlapSec', label: 'Overlap seconds', kind: 'number', default: 10, min: 0, max: 120, step: 1 },
       { key: 'burnChunkMin', label: 'Burn chunk minutes', kind: 'number', default: 5, min: 0.5, max: 120, step: 0.5 },
+      {
+        key: 'burnMode', label: 'Burn-in mode', kind: 'select', default: 'segmented',
+        options: BURN_MODES,
+      },
       { key: 'translate', label: 'Translate', kind: 'checkbox', default: true },
       { key: 'burnIn', label: 'Burn-in subtitles', kind: 'checkbox', default: true },
       { key: 'bilingual', label: 'Bilingual subtitles', kind: 'checkbox', default: false },

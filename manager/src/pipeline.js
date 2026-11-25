@@ -15,7 +15,7 @@ import { groupSegments, verifyTranslateResult } from './translate.js';
 import { llmConfig, generateText } from './llm.js';
 import { planBurnSegments, shiftSegments } from './burnPlan.js';
 import { probe, extractAudio, splitAudio, listKeyframes, splitVideo, checkConcatCompatible, concatVideos, muxSoft } from './ffmpeg.js';
-import { TRANSCRIPTION_ENGINES, DEFAULT_ENGINE } from './jobTypes.js';
+import { TRANSCRIPTION_ENGINES, DEFAULT_ENGINE, BURN_MODES, DEFAULT_BURN_MODE } from './jobTypes.js';
 
 export const STALE_ASSIGNED_MS = 15 * 60 * 1000;
 // Un-acked assignments are re-offered quickly; the 15-minute stale sweep
@@ -32,7 +32,7 @@ export const EXCLUDE_GRACE_MS = 60 * 1000;
 // the scheduler only records the failure). Translate gets more tries
 // because Gemini calls fail transiently more often; burn-in gets one:
 // a failed encode is deterministic far more often than transient.
-export const RETRY_BUDGET = { transcribe: 2, translate: 3, burnin: 1 };
+export const RETRY_BUDGET = { transcribe: 2, translate: 3, burnin: 1, 'final-burnin': 1 };
 // Cap on simultaneous in-flight (assigned) tasks across the LAN.
 // Overridable with MAX_IN_FLIGHT_TASKS.
 export const DEFAULT_MAX_IN_FLIGHT = 16;
@@ -215,12 +215,16 @@ export class Runner {
       chunkMin: Number(fields.chunkMin || 10),
       overlapSec: Number(fields.overlapSec ?? 10),
       burnChunkMin: Number(fields.burnChunkMin || 5),
+      burnMode: fields.burnMode || DEFAULT_BURN_MODE,
       translate: fields.translate !== 'false' && fields.translate !== false,
       burnIn: fields.burnIn !== 'false' && fields.burnIn !== false,
       bilingual: fields.bilingual === 'true' || fields.bilingual === true,
     };
     if (!TRANSCRIPTION_ENGINES.some((e) => e.value === config.engine)) {
       throw new Error(`unknown transcription engine: ${config.engine}`);
+    }
+    if (!BURN_MODES.some((m) => m.value === config.burnMode)) {
+      throw new Error(`unknown burn mode: ${config.burnMode}`);
     }
     if (!(config.chunkMin >= 0.5 && config.chunkMin <= 120)) throw new Error('chunkMin must be 0.5–120');
     if (!(config.burnChunkMin >= 0.5 && config.burnChunkMin <= 120)) throw new Error('burnChunkMin must be 0.5–120');
@@ -524,6 +528,34 @@ export class Runner {
     this.log(job, `Burn-in video written: video.mp4 (concatenated from ${segFiles.length} segment(s))`);
   }
 
+  finalBurninTasks(job) {
+    return job.tasks.filter((t) => t.type === 'final-burnin');
+  }
+
+  /** Final burn-in: write ONE total ASS from the merged segments
+   * (absolute times — no shifting, unlike the per-segment ASS) and
+   * create a single final-burnin task. The worker burns the whole
+   * video in one ffmpeg pass and uploads the finished video.mp4. */
+  async planFinalBurn(job, mainSegs) {
+    const burnDir = this.store.jobPath(job.id, 'burn');
+    fs.mkdirSync(burnDir, { recursive: true });
+    const assFile = path.join('burn', 'final.ass');
+    fs.writeFileSync(this.store.jobPath(job.id, assFile), toAss(mainSegs));
+    job.finalAssFile = assFile;
+    job.tasks.push(this.newTask('final-burnin'));
+    this.log(job, 'Planned final burn-in: whole video in one pass');
+  }
+
+  /** Move the worker's finished whole-video burn into place. */
+  async finishFinalBurn(job) {
+    const src = this.store.jobPath(job.id, 'results', 'final-burnin.mp4');
+    if (!fs.existsSync(src)) throw new Error('final burn-in result missing');
+    const out = this.store.jobPath(job.id, 'video.mp4');
+    fs.renameSync(src, out);
+    job.outputs.video = 'video.mp4';
+    this.log(job, 'Burn-in video written: video.mp4 (single whole-video pass)');
+  }
+
   async synthesize(job) {
     const inputPath = this.store.jobPath(job.id, job.inputFile);
     const mainSrt = job.outputs.translatedSrt || job.outputs.sourceSrt;
@@ -539,16 +571,29 @@ export class Runner {
     }
     if (job.config.burnIn) {
       if (!job.hasVideo) throw new Error('burn-in requires a video stream (input has audio only)');
-      if (!job.burnSegments || job.burnSegments.length === 0) {
-        await this.planBurn(job, mainSegs, inputPath);
-        return; // wait for workers to burn the segments
+      if (job.config.burnMode === 'final') {
+        if (!job.finalAssFile) {
+          await this.planFinalBurn(job, mainSegs);
+          return; // wait for the worker to burn the whole video
+        }
+        const tasks = this.finalBurninTasks(job);
+        if (tasks.some((t) => t.state === 'queued' || t.state === 'assigned')) return;
+        if (tasks.some((t) => t.state === 'failed')) {
+          throw new Error('a final burn-in task failed after retries');
+        }
+        await this.finishFinalBurn(job);
+      } else {
+        if (!job.burnSegments || job.burnSegments.length === 0) {
+          await this.planBurn(job, mainSegs, inputPath);
+          return; // wait for workers to burn the segments
+        }
+        const tasks = this.burninTasks(job);
+        if (tasks.some((t) => t.state === 'queued' || t.state === 'assigned')) return;
+        if (tasks.some((t) => t.state === 'failed')) {
+          throw new Error('a burn-in task failed after retries');
+        }
+        await this.concatBurn(job);
       }
-      const tasks = this.burninTasks(job);
-      if (tasks.some((t) => t.state === 'queued' || t.state === 'assigned')) return;
-      if (tasks.some((t) => t.state === 'failed')) {
-        throw new Error('a burn-in task failed after retries');
-      }
-      await this.concatBurn(job);
     }
     const softOut = this.store.jobPath(job.id, 'soft.mp4');
     const srtPath = this.store.jobPath(job.id, mainSrt);
@@ -664,6 +709,31 @@ export class Runner {
         },
       };
     }
+    if (task.type === 'final-burnin') {
+      // JSON payload: the worker downloads the ORIGINAL video + the
+      // total ASS itself. No trimStart/duration: the worker encodes
+      // the whole video (no -t) and stream-copies the audio. The whole
+      // video is larger than a segment, so the download is one big
+      // transfer instead of many small ones — the price of the single
+      // pass. The worker reuses the same download path as burnin.
+      const v = job.videoInfo || {};
+      return {
+        kind: 'json',
+        payload: {
+          taskId: task.id,
+          type: 'final-burnin',
+          videoUrl: `/api/tasks/${task.id}/input?part=video`,
+          assUrl: `/api/tasks/${task.id}/input?part=ass`,
+          duration: job.duration,
+          crf: 20,
+          fps: v.fps ?? null,
+          width: v.width ?? null,
+          height: v.height ?? null,
+          videoCodec: v.videoCodec ?? null,
+          audioBitrate: v.audioBitrate ?? null,
+        },
+      };
+    }
     // translate: JSON payload (segments + LLM credentials for the worker).
     // Credentials resolve per claiming worker: a per-worker override wins
     // per field, otherwise the global server/.env config. task.workerId
@@ -715,6 +785,10 @@ export class Runner {
         if (!fs.existsSync(resultPath)) throw new Error('bad burn-in result: file missing');
         const seg = job.burnSegments[task.segmentIndex];
         if (seg) seg.state = 'done';
+      } else if (task.type === 'final-burnin') {
+        if (!result || !result.file) throw new Error('bad final burn-in result: missing file');
+        const resultPath = this.store.jobPath(job.id, 'results', 'final-burnin.mp4');
+        if (!fs.existsSync(resultPath)) throw new Error('bad final burn-in result: file missing');
       } else {
         if (!result || !Array.isArray(result.lines)) throw new Error('bad translate result: missing lines');
         const reseg = this.store.readJson(this.store.jobPath(job.id, 'resegmented.json'), { segments: [] });
