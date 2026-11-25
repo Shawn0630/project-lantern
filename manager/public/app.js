@@ -19,6 +19,15 @@ function fmtAgo(iso) {
   return `${Math.floor(m / 60)}h ago`;
 }
 
+function fmtSize(bytes) {
+  if (bytes == null) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let n = bytes;
+  let u = 0;
+  while (n >= 1024 && u < units.length - 1) { n /= 1024; u += 1; }
+  return `${u === 0 || n >= 100 ? Math.round(n) : n.toFixed(1)} ${units[u]}`;
+}
+
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -49,8 +58,42 @@ async function refreshHealth() {
 // ---- new job: pick a type first, then render that type's form ----
 // The form is built from the GET /api/job-types schema, so a new job
 // type needs no UI change — only a registry entry server-side.
+// The video can come from an upload (as before) or from the repo:
+// the source toggle swaps the file dropzone for a repo-video select,
+// and the submit sends repoVideoId instead of a file part.
 let jobTypes = [];
 let selectedJobType = null;
+let jobSource = 'upload'; // 'upload' | 'repo'
+let pendingRepoVideoId = null;
+
+function renderSourcePicker() {
+  $$('#job-source-picker [data-source]').forEach((b) =>
+    b.classList.toggle('selected', b.dataset.source === jobSource));
+}
+
+function setJobSource(source, preselectVideoId) {
+  jobSource = source;
+  if (preselectVideoId) pendingRepoVideoId = preselectVideoId;
+  renderSourcePicker();
+  if (selectedJobType) renderJobForm(selectedJobType);
+}
+
+async function refreshRepoSelect() {
+  const sel = $('#repo-video-select');
+  if (!sel) return;
+  try {
+    const videos = await api('/api/repo/videos');
+    if (!videos.length) {
+      sel.innerHTML = '<option value="">(repo is empty — upload a video first)</option>';
+      return;
+    }
+    const want = pendingRepoVideoId;
+    sel.innerHTML = videos.map((v) => `<option value="${esc(v.id)}"${v.id === want ? ' selected' : ''}>${esc(v.filename)} (${fmtSize(v.size)})</option>`).join('');
+    pendingRepoVideoId = null;
+  } catch {
+    sel.innerHTML = '<option value="">(could not load repo)</option>';
+  }
+}
 
 async function loadJobTypes() {
   try {
@@ -95,13 +138,18 @@ function fieldHtml(f) {
 
 function renderJobForm(type) {
   const form = $('#upload-form');
-  const fields = type.fields.filter((f) => f.kind !== 'checkbox');
+  const fields = type.fields.filter((f) => f.kind !== 'checkbox' && (jobSource !== 'repo' || f.kind !== 'file'));
   const toggles = type.fields.filter((f) => f.kind === 'checkbox');
-  form.innerHTML = `<div class="form-grid">${fields.map(fieldHtml).join('')}</div>`
+  const repoHtml = jobSource === 'repo'
+    ? `<div class="form-grid"><label class="field"><span class="field-label">Repo video</span>
+      <select name="repoVideo" id="repo-video-select"><option value="">Loading…</option></select></label></div>`
+    : '';
+  form.innerHTML = repoHtml + `<div class="form-grid">${fields.map(fieldHtml).join('')}</div>`
     + (toggles.length ? `<div class="toggles">${toggles.map(fieldHtml).join('')}</div>` : '')
-    + `<div class="form-actions"><button type="submit" class="btn-primary">Upload</button><span id="upload-status"></span></div>`;
+    + `<div class="form-actions"><button type="submit" class="btn-primary">${jobSource === 'repo' ? 'Create job' : 'Upload'}</button><span id="upload-status"></span></div>`;
   form.hidden = false;
   wireDropzones(form);
+  if (jobSource === 'repo') refreshRepoSelect();
 }
 
 function wireDropzones(form) {
@@ -142,6 +190,11 @@ $('#job-type-picker').addEventListener('click', (e) => {
   if (card) selectJobType(card.dataset.type);
 });
 
+$('#job-source-picker').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-source]');
+  if (btn) setJobSource(btn.dataset.source);
+});
+
 function stagePill(stage) {
   const cls = stage === 'done' ? 'ok' : stage === 'failed' ? 'bad' : 'run';
   return `<span class="pill ${cls}">${esc(stage)}</span>`;
@@ -161,6 +214,57 @@ async function loadJobs() {
       <td><a href="#/jobs/${esc(j.id)}">Open</a></td>
     </tr>`;
   }).join('') || '<tr><td colspan="6"><div class="empty-state">No jobs yet</div></td></tr>';
+}
+
+// ---- repo: upload into the video library, list, delete, new job ----
+async function loadRepo() {
+  const videos = await api('/api/repo/videos');
+  const tbody = $('#repo-table tbody');
+  tbody.innerHTML = videos.map((v) => `<tr>
+    <td><span class="job-name">${esc(v.filename)}</span><br><small>${esc(v.id)}</small></td>
+    <td>${fmtSize(v.size)}</td>
+    <td>${fmtAgo(v.uploadedAt)}</td>
+    <td><button data-repo-job="${esc(v.id)}">New job</button> <button data-del-repo="${esc(v.id)}">Delete</button></td>
+  </tr>`).join('') || '<tr><td colspan="4"><div class="empty-state">Repo is empty — upload a video above.</div></td></tr>';
+}
+
+// Repo upload uses XHR (not fetch) so a multi-GB upload can show
+// progress; fetch gives no upload-progress events.
+function submitRepoUpload(form) {
+  const status = $('#repo-upload-status');
+  const input = form.querySelector('input[type="file"]');
+  if (!input.files || !input.files.length) {
+    status.textContent = 'Choose a video file first';
+    return;
+  }
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/repo/videos');
+  xhr.upload.onprogress = (ev) => {
+    if (ev.lengthComputable) status.textContent = `Uploading… ${Math.round((100 * ev.loaded) / ev.total)}%`;
+  };
+  xhr.onload = () => {
+    if (xhr.status === 201) {
+      status.textContent = 'Uploaded';
+      form.reset();
+      const zone = form.querySelector('[data-dropzone]');
+      if (zone) {
+        zone.querySelector('.dropzone-text').hidden = false;
+        const fileEl = zone.querySelector('.dropzone-file');
+        fileEl.hidden = true;
+        fileEl.textContent = '';
+      }
+      loadRepo();
+    } else {
+      let msg = `HTTP ${xhr.status}`;
+      try { msg = JSON.parse(xhr.responseText).error || msg; } catch { /* keep status */ }
+      status.textContent = 'Upload failed: ' + msg;
+    }
+  };
+  xhr.onerror = () => { status.textContent = 'Upload failed: network error'; };
+  status.textContent = 'Uploading… 0%';
+  xhr.send(fd);
 }
 
 function fmtStats(stats) {
@@ -307,6 +411,7 @@ async function loadJobDetail(id) {
     ['Created', new Date(job.createdAt).toLocaleString()],
     ['Duration', fmtTime(job.duration)],
     ['Source', job.config.sourceLang],
+    ['Video source', job.repoVideoId ? `repo (${job.repoVideoId})` : 'upload'],
     ['Target', job.config.targetLang],
     ['Model', job.config.model],
     ['Chunk', `${job.config.chunkMin} min / ${job.config.overlapSec}s overlap`],
@@ -346,7 +451,7 @@ let pollTimer = null;
 function route() {
   const hash = location.hash || '#/jobs';
   const m = /^#\/jobs\/([^/]+)$/.exec(hash);
-  $$('#view-jobs, #view-workers, #view-job').forEach((el) => { el.hidden = true; });
+  $$('#view-jobs, #view-repo, #view-workers, #view-job').forEach((el) => { el.hidden = true; });
   $$('header nav a').forEach((a) => a.classList.remove('active'));
   clearInterval(pollTimer);
   if (m) {
@@ -354,6 +459,12 @@ function route() {
     $('#view-job').hidden = false;
     loadJobDetail(m[1]).catch(() => {});
     pollTimer = setInterval(() => loadJobDetail(m[1]).catch(() => {}), 2000);
+  } else if (hash === '#/repo') {
+    currentView = 'repo';
+    $('[data-nav="repo"]').classList.add('active');
+    $('#view-repo').hidden = false;
+    loadRepo().catch(() => {});
+    pollTimer = setInterval(() => loadRepo().catch(() => {}), 5000);
   } else if (hash === '#/workers') {
     currentView = 'workers';
     $('[data-nav="workers"]').classList.add('active');
@@ -374,7 +485,7 @@ function route() {
 $('#upload-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const status = $('#upload-status');
-  status.textContent = 'Uploading…';
+  status.textContent = jobSource === 'repo' ? 'Creating job…' : 'Uploading…';
   try {
     const fd = new FormData(e.target);
     if (selectedJobType) {
@@ -383,14 +494,19 @@ $('#upload-form').addEventListener('submit', async (e) => {
         if (f.kind === 'checkbox') fd.set(f.key, e.target.elements[f.key].checked ? 'true' : 'false');
       }
     }
+    if (jobSource === 'repo') {
+      const videoId = e.target.elements.repoVideo ? e.target.elements.repoVideo.value : '';
+      if (!videoId) throw new Error('choose a repo video first');
+      fd.set('repoVideoId', videoId);
+    }
     const res = await fetch('/api/jobs', { method: 'POST', body: fd });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
-    status.textContent = 'Uploaded: ' + body.id;
+    status.textContent = 'Created job: ' + body.id;
     if (selectedJobType) renderJobForm(selectedJobType);
     loadJobs();
   } catch (err) {
-    status.textContent = 'Upload failed: ' + err.message;
+    status.textContent = (jobSource === 'repo' ? 'Create failed: ' : 'Upload failed: ') + err.message;
   }
 });
 
@@ -416,6 +532,23 @@ document.addEventListener('click', async (e) => {
     openWorkerSettings(settingsBtn.dataset.settingsWorker).catch(() => {});
     return;
   }
+  const repoJobBtn = e.target.closest('[data-repo-job]');
+  if (repoJobBtn) {
+    // Jump to the Jobs view with the repo video pre-selected in the
+    // "From repo" job form. Setting the hash fires route(); the
+    // pending id is consumed by refreshRepoSelect once the form renders.
+    pendingRepoVideoId = repoJobBtn.dataset.repoJob;
+    if (location.hash !== '#/jobs') location.hash = '#/jobs';
+    setJobSource('repo', pendingRepoVideoId);
+    return;
+  }
+  const delRepoBtn = e.target.closest('[data-del-repo]');
+  if (delRepoBtn) {
+    if (!confirm('Delete this video from the repo? Jobs already created from it keep working.')) return;
+    await api(`/api/repo/videos/${encodeURIComponent(delRepoBtn.dataset.delRepo)}`, { method: 'DELETE' });
+    loadRepo();
+    return;
+  }
   const btn = e.target.closest('[data-del-worker]');
   if (!btn) return;
   if (!confirm('Delete this worker?')) return;
@@ -425,6 +558,12 @@ document.addEventListener('click', async (e) => {
     $('#worker-settings-card').hidden = true;
   }
   loadWorkers();
+});
+
+wireDropzones($('#repo-upload-form'));
+$('#repo-upload-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  submitRepoUpload(e.target);
 });
 
 window.addEventListener('hashchange', route);

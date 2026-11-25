@@ -11,13 +11,28 @@ from gemini import build_translate_prompt, parse_numbered_lines, translate_lines
 
 
 class FakeResponse:
-    def __init__(self, status_code, payload=None, text=""):
+    def __init__(self, status_code, payload=None, text="", content=b""):
         self.status_code = status_code
         self._payload = payload or {}
         self.text = text
+        self._content = content
 
     def json(self):
         return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def iter_content(self, chunk_size=1 << 20):
+        for i in range(0, len(self._content), chunk_size):
+            yield self._content[i:i + chunk_size]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
 
 
 class FakeSession:
@@ -320,3 +335,64 @@ def test_heartbeat_reports_models(monkeypatch, tmp_path):
     monkeypatch.setattr(worker_mod, "manager_post", fake_post)
     worker_mod.heartbeat()
     assert posted["payload"]["models"] == {"loaded": None, "available": ["large-v3"]}
+
+# ---- repo video download (LAN video library) ----
+def test_download_repo_video_full(monkeypatch, tmp_path):
+    data = b"0123456789AB"
+    seen = {}
+
+    def fake_get(url, headers=None, stream=None, timeout=None):
+        seen["url"] = url
+        seen["headers"] = headers
+        assert headers == {}
+        assert stream is True
+        return FakeResponse(200, content=data)
+
+    monkeypatch.setattr(worker_mod, "MANAGER_URL", "http://manager:9400")
+    monkeypatch.setattr(worker_mod.requests, "get", fake_get)
+    dest = tmp_path / "clip.mp4"
+    assert worker_mod.download_repo_video("video_abc", dest) == str(dest)
+    assert dest.read_bytes() == data
+    assert seen["url"] == "http://manager:9400/api/repo/videos/video_abc"
+
+
+def test_download_repo_video_resumes_partial(monkeypatch, tmp_path):
+    data = b"0123456789AB"
+    seen = {}
+
+    def fake_get(url, headers=None, stream=None, timeout=None):
+        seen["headers"] = headers
+        assert headers == {"Range": "bytes=4-"}
+        return FakeResponse(206, content=data[4:])
+
+    monkeypatch.setattr(worker_mod, "MANAGER_URL", "http://manager:9400")
+    monkeypatch.setattr(worker_mod.requests, "get", fake_get)
+    dest = tmp_path / "clip.mp4"
+    dest.write_bytes(data[:4])
+    assert worker_mod.download_repo_video("video_abc", dest) == str(dest)
+    assert dest.read_bytes() == data
+
+
+def test_download_repo_video_restarts_when_server_ignores_range(monkeypatch, tmp_path):
+    data = b"0123456789AB"
+
+    def fake_get(url, headers=None, stream=None, timeout=None):
+        assert headers == {"Range": "bytes=4-"}
+        return FakeResponse(200, content=data)
+
+    monkeypatch.setattr(worker_mod, "MANAGER_URL", "http://manager:9400")
+    monkeypatch.setattr(worker_mod.requests, "get", fake_get)
+    dest = tmp_path / "clip.mp4"
+    dest.write_bytes(data[:4])
+    assert worker_mod.download_repo_video("video_abc", dest) == str(dest)
+    assert dest.read_bytes() == data
+
+
+def test_download_repo_video_raises_on_http_error(monkeypatch, tmp_path):
+    def fake_get(url, headers=None, stream=None, timeout=None):
+        return FakeResponse(404, text="repo video not found")
+
+    monkeypatch.setattr(worker_mod, "MANAGER_URL", "http://manager:9400")
+    monkeypatch.setattr(worker_mod.requests, "get", fake_get)
+    with pytest.raises(RuntimeError, match="HTTP 404"):
+        worker_mod.download_repo_video("video_nope", tmp_path / "clip.mp4")

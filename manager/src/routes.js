@@ -14,6 +14,36 @@ const DOWNLOADABLE = {
   'soft.mp4': (job) => job.outputs.softVideo,
 };
 
+// Display/download filename: no path separators, quotes or control
+// characters, so it is safe in metadata and Content-Disposition.
+function sanitizeFilename(name) {
+  return String(name || '').replace(/[\\/]/g, '_').replace(/["\r\n\x00-\x1f\x7f]/g, '').trim() || 'video';
+}
+
+// Parse a single-part HTTP Range header. Returns { start, end }
+// (inclusive) or null when malformed or unsatisfiable.
+function parseRange(header, size) {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(header || '').trim());
+  if (!m) return null;
+  const [, startStr, endStr] = m;
+  if (startStr === '' && endStr === '') return null;
+  let start;
+  let end;
+  if (startStr === '') {
+    // Suffix range: the last N bytes.
+    const suffix = Number(endStr);
+    if (!suffix) return null;
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number(startStr);
+    end = endStr === '' ? size - 1 : Number(endStr);
+  }
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || start >= size) return null;
+  end = Math.min(end, size - 1);
+  return { start, end };
+}
+
 export function createRouter(store, runner) {
   const router = express.Router();
 
@@ -118,15 +148,29 @@ export function createRouter(store, runner) {
       const jobType = fields.jobType || 'video-translation';
       const type = getJobType(jobType);
       if (!type) return res.status(400).json({ error: `unknown job type: ${jobType}` });
-      for (const field of type.fields) {
-        if (field.kind === 'file' && field.required && !files.find((f) => f.fieldname === field.key)) {
-          return res.status(400).json({ error: `missing ${field.label.toLowerCase()} file (field "${field.key}")` });
+      // Source: either an uploaded file (as before) or a repo video
+      // (fields.repoVideoId). Exactly one of the two.
+      const repoVideoId = fields.repoVideoId || null;
+      let job;
+      if (repoVideoId) {
+        if (files.length > 0) {
+          for (const f of files) fs.rmSync(f.path, { force: true });
+          return res.status(400).json({ error: 'provide either a file upload or repoVideoId, not both' });
         }
+        const repoVideo = store.getRepoVideo(repoVideoId);
+        if (!repoVideo) return res.status(404).json({ error: 'repo video not found' });
+        job = runner.createJobFromRepo(fields, repoVideo);
+      } else {
+        for (const field of type.fields) {
+          if (field.kind === 'file' && field.required && !files.find((f) => f.fieldname === field.key)) {
+            return res.status(400).json({ error: `missing ${field.label.toLowerCase()} file (field "${field.key}")` });
+          }
+        }
+        const fileField = type.fields.find((f) => f.kind === 'file');
+        const video = fileField && files.find((f) => f.fieldname === fileField.key);
+        if (!video) return res.status(400).json({ error: `missing ${fileField.label.toLowerCase()} file (field "${fileField.key}")` });
+        job = runner.createJob(fields, { path: video.path, originalName: video.filename || 'video.mp4' });
       }
-      const fileField = type.fields.find((f) => f.kind === 'file');
-      const video = fileField && files.find((f) => f.fieldname === fileField.key);
-      if (!video) return res.status(400).json({ error: `missing ${fileField.label.toLowerCase()} file (field "${fileField.key}")` });
-      const job = runner.createJob(fields, { path: video.path, originalName: video.filename || 'video.mp4' });
       job.jobType = jobType;
       if (store.saveJob) store.saveJob(job);
       runner.tick().catch(() => {});
@@ -160,6 +204,98 @@ export function createRouter(store, runner) {
     const file = store.jobPath(job.id, rel);
     if (!fs.existsSync(file)) return res.status(404).json({ error: 'file missing' });
     res.download(file, name);
+  });
+
+  // ---- repo (LAN video library) ----
+  // Plain HTTP, no auth — the same LAN-trust model as the rest of the
+  // API, so workers can pull videos directly with a single GET.
+  router.get('/repo/videos', (req, res) => {
+    res.json(store.listRepoVideos());
+  });
+
+  // Upload a video into the repo. The file part streams to disk (see
+  // multipart.js) — a multi-GB video is never buffered in memory.
+  router.post('/repo/videos', async (req, res) => {
+    const ct = req.headers['content-type'] || '';
+    const m = /multipart\/form-data;\s*boundary=(?:"([^"]+)"|([^;]+))/.exec(ct);
+    if (!m) return res.status(400).json({ error: 'expected multipart/form-data' });
+    const boundary = (m[1] || m[2]).trim();
+    const id = newId('video');
+    const tmpPath = path.join(store.repoDir, `${id}.tmp`);
+    try {
+      const { files } = await parseMultipart(req, boundary, (fieldname) => {
+        if (fieldname !== 'file') throw new Error('unexpected file field: ' + fieldname);
+        return tmpPath;
+      });
+      const file = files[0];
+      if (files.length !== 1 || !file || file.size === 0) {
+        fs.rmSync(tmpPath, { force: true });
+        return res.status(400).json({ error: 'missing video file (field "file")' });
+      }
+      // Keep the original extension on disk so the repo dir stays
+      // browsable; the record is the source of truth for the name.
+      const ext = (/(\.[A-Za-z0-9]+)$/.exec(file.filename || '') || [])[1] || '';
+      const storedName = `${id}${ext}`;
+      fs.renameSync(tmpPath, path.join(store.repoDir, storedName));
+      const video = {
+        id,
+        filename: sanitizeFilename(file.filename || storedName),
+        storedName,
+        size: file.size,
+        uploadedAt: new Date().toISOString(),
+      };
+      store.addRepoVideo(video);
+      res.status(201).json(video);
+    } catch (err) {
+      fs.rmSync(tmpPath, { force: true });
+      res.status(400).json({ error: String(err?.message || err) });
+    }
+  });
+
+  // Download a repo video. Supports HTTP Range (bytes=start-end,
+  // bytes=start-, bytes=-suffix) so a worker can resume a large
+  // download instead of restarting it.
+  router.get('/repo/videos/:id', (req, res) => {
+    const video = store.getRepoVideo(req.params.id);
+    if (!video) return res.status(404).json({ error: 'repo video not found' });
+    const file = store.repoVideoPath(video);
+    if (!fs.existsSync(file)) return res.status(404).json({ error: 'file missing' });
+    const size = fs.statSync(file).size;
+    const headers = {
+      'Content-Type': 'application/octet-stream',
+      'Content-Disposition': `attachment; filename="${sanitizeFilename(video.filename)}"`,
+      'Accept-Ranges': 'bytes',
+    };
+    const range = req.headers.range;
+    if (!range) {
+      res.writeHead(200, { ...headers, 'Content-Length': size });
+      if (req.method === 'HEAD') return res.end();
+      fs.createReadStream(file).pipe(res);
+      return;
+    }
+    const parsed = parseRange(range, size);
+    if (!parsed) {
+      res.writeHead(416, { ...headers, 'Content-Range': `bytes */${size}` });
+      return res.end();
+    }
+    const { start, end } = parsed;
+    res.writeHead(206, {
+      ...headers,
+      'Content-Range': `bytes ${start}-${end}/${size}`,
+      'Content-Length': end - start + 1,
+    });
+    if (req.method === 'HEAD') return res.end();
+    fs.createReadStream(file, { start, end }).pipe(res);
+  });
+
+  router.delete('/repo/videos/:id', (req, res) => {
+    const video = store.removeRepoVideo(req.params.id);
+    if (!video) return res.status(404).json({ error: 'repo video not found' });
+    // Jobs created from this video keep working: their input is a hard
+    // link to the same inode, so removing the repo's name does not
+    // free the data.
+    fs.rmSync(store.repoVideoPath(video), { force: true });
+    res.json({ ok: true });
   });
 
   // ---- workers ----

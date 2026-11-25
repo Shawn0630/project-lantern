@@ -2,6 +2,8 @@
 //   workers.json                  — worker registry
 //   jobs/<id>/job.json            — job record (config, stages, tasks, logs)
 //   jobs/<id>/input/<name>        — uploaded video
+//   repo/<id><ext>                 — video library file (LAN repo)
+//   repo/videos.json               — repo video metadata (id, filename, size, uploadedAt)
 //   jobs/<id>/audio.wav           — extracted 16kHz mono audio
 //   jobs/<id>/chunks/chunk_000.wav
 //   jobs/<id>/results/transcribe_<i>.json | translate_<i>.json
@@ -21,6 +23,13 @@ export class Store {
     this.workersPath = path.join(dataDir, 'workers.json');
     if (!fs.existsSync(this.workersPath)) {
       fs.writeFileSync(this.workersPath, '[]\n');
+    }
+    // LAN video repo: one file per video + a metadata index.
+    this.repoDir = path.join(dataDir, 'repo');
+    fs.mkdirSync(this.repoDir, { recursive: true });
+    this.repoIndexPath = path.join(this.repoDir, 'videos.json');
+    if (!fs.existsSync(this.repoIndexPath)) {
+      fs.writeFileSync(this.repoIndexPath, '[]\n');
     }
   }
 
@@ -76,6 +85,44 @@ export class Store {
 
   jobFileExists(id, ...parts) {
     return fs.existsSync(this.jobPath(id, ...parts));
+  }
+
+  // ---- repo (LAN video library) ----
+  // Records: { id, filename, storedName, size, uploadedAt }. The file
+  // on disk is <id><ext>; the extension is kept so the repo dir stays
+  // browsable, the record is the source of truth for the display name.
+  listRepoVideos() {
+    const videos = this.readJson(this.repoIndexPath, []);
+    if (!Array.isArray(videos)) return [];
+    return videos.slice().sort((a, b) => (b.uploadedAt || '').localeCompare(a.uploadedAt || ''));
+  }
+
+  getRepoVideo(id) {
+    if (!id || id.includes('/') || id.includes('..')) return null;
+    return this.listRepoVideos().find((v) => v.id === id) || null;
+  }
+
+  repoVideoPath(video) {
+    return path.join(this.repoDir, video.storedName);
+  }
+
+  addRepoVideo(video) {
+    const videos = this.listRepoVideos();
+    videos.push(video);
+    this.writeJsonAtomic(this.repoIndexPath, videos);
+    return video;
+  }
+
+  // Removes the metadata record; returns it, or null when unknown.
+  // The caller also removes the file. Jobs created from the video
+  // keep working: their input is a hard link to the same inode.
+  removeRepoVideo(id) {
+    const videos = this.listRepoVideos();
+    const idx = videos.findIndex((v) => v.id === id);
+    if (idx === -1) return null;
+    const [removed] = videos.splice(idx, 1);
+    this.writeJsonAtomic(this.repoIndexPath, videos);
+    return removed;
   }
 
   // ---- workers ----

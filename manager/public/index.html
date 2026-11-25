@@ -11,6 +11,7 @@
   <h1>Lantern</h1>
   <nav>
     <a href="#/jobs" data-nav="jobs">Jobs</a>
+    <a href="#/repo" data-nav="repo">Repo</a>
     <a href="#/workers" data-nav="workers">Workers</a>
   </nav>
   <span id="health" class="pill">—</span>
@@ -20,12 +21,39 @@
     <h2>Jobs</h2>
     <div class="card">
       <h3>New job</h3>
+      <div class="type-picker" id="job-source-picker">
+        <button type="button" class="type-card selected" data-source="upload">Upload file</button>
+        <button type="button" class="type-card" data-source="repo">From repo</button>
+      </div>
       <div id="job-type-picker" class="type-picker"></div>
       <form id="upload-form" hidden></form>
     </div>
     <div class="card table-card">
       <table id="jobs-table">
         <thead><tr><th>Job</th><th>Stage</th><th>Progress</th><th>Duration</th><th>Created</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="view-repo" hidden>
+    <h2>Video repo</h2>
+    <div class="card">
+      <h3>Upload to repo</h3>
+      <form id="repo-upload-form">
+        <label class="field field-file"><span class="field-label">Video</span>
+          <span class="dropzone" data-dropzone="repo-file">
+            <span class="dropzone-text">Drop file here or choose</span>
+            <span class="dropzone-file" hidden></span>
+            <input type="file" name="file" accept="video/*,audio/*" hidden>
+          </span></label>
+        <div class="form-actions"><button type="submit" class="btn-primary">Upload to repo</button><span id="repo-upload-status"></span></div>
+      </form>
+      <small>Videos stay in the repo until deleted. A job created from a repo video keeps working even after the repo copy is deleted.</small>
+    </div>
+    <div class="card table-card">
+      <table id="repo-table">
+        <thead><tr><th>Video</th><th>Size</th><th>Uploaded</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
     </div>

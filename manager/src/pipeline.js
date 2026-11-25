@@ -188,8 +188,7 @@ export class Runner {
   }
 
   // ---- job creation ----
-  createJob(fields, inputFile) {
-    const id = newId('job');
+  buildJobConfig(fields) {
     const config = {
       sourceLang: fields.sourceLang || 'auto',
       targetLang: fields.targetLang || 'zh-CN',
@@ -206,6 +205,12 @@ export class Runner {
     if (!(config.overlapSec >= 0 && config.overlapSec < config.chunkMin * 60)) {
       throw new Error('overlapSec must be >= 0 and < chunk length');
     }
+    return config;
+  }
+
+  createJob(fields, inputFile) {
+    const id = newId('job');
+    const config = this.buildJobConfig(fields);
     const job = {
       id,
       name: inputFile.originalName,
@@ -227,6 +232,53 @@ export class Runner {
     fs.renameSync(inputFile.path, inputPath);
     job.inputFile = path.join('input', inputFile.originalName);
     this.log(job, `Job created: ${job.name}`);
+    this.store.saveJob(job);
+    return job;
+  }
+
+  // Create a job from a repo video. The job's input is a HARD LINK to
+  // the repo file, not a copy: same inode, zero extra disk for even a
+  // multi-GB video, and the job keeps working if the repo entry is
+  // later deleted (deleting only removes the repo's name; the job's
+  // link keeps the data alive). Falls back to a copy when linking is
+  // impossible (e.g. repo and job dirs on different filesystems).
+  // prepare() and everything downstream work unchanged: they only see
+  // job.inputFile, exactly as for an uploaded video.
+  createJobFromRepo(fields, repoVideo) {
+    const id = newId('job');
+    const config = this.buildJobConfig(fields);
+    const job = {
+      id,
+      name: repoVideo.filename,
+      createdAt: new Date().toISOString(),
+      config,
+      stage: 'preparing',
+      duration: 0,
+      chunks: [],
+      burnSegments: [],
+      tasks: [],
+      logs: [],
+      outputs: {},
+      error: null,
+      repoVideoId: repoVideo.id,
+    };
+    fs.mkdirSync(this.store.jobPath(id, 'input'), { recursive: true });
+    fs.mkdirSync(this.store.jobPath(id, 'chunks'), { recursive: true });
+    fs.mkdirSync(this.store.jobPath(id, 'results'), { recursive: true });
+    const repoPath = this.store.repoVideoPath(repoVideo);
+    if (!fs.existsSync(repoPath)) throw new Error('repo video file missing');
+    const inputPath = this.store.jobPath(id, 'input', repoVideo.filename);
+    try {
+      fs.linkSync(repoPath, inputPath);
+    } catch (err) {
+      if (err.code === 'EXDEV' || err.code === 'EPERM') {
+        fs.copyFileSync(repoPath, inputPath);
+      } else {
+        throw err;
+      }
+    }
+    job.inputFile = path.join('input', repoVideo.filename);
+    this.log(job, `Job created from repo video: ${job.name}`);
     this.store.saveJob(job);
     return job;
   }

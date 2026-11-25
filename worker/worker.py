@@ -387,6 +387,33 @@ def download_url(rel_url, suffix):
     return tmp.name
 
 
+def download_repo_video(video_id: str, dest=None):
+    """Download a repo video from the manager, resuming a partial file.
+
+    Plain HTTP GET on /api/repo/videos/:id — no session or browser
+    needed. When `dest` already holds a prefix of the file, the
+    request carries Range: bytes=<have>- and the rest is appended,
+    so a large download resumes instead of restarting. When the
+    server answers 200 instead of 206 (range ignored), the file is
+    rewritten from scratch. Returns the path of the complete file."""
+    url = f"{MANAGER_URL}/api/repo/videos/{video_id}"
+    dest = Path(dest) if dest else Path(tempfile.gettempdir()) / f"lantern-repo-{video_id}"
+    have = dest.stat().st_size if dest.exists() else 0
+    headers = {"Range": f"bytes={have}-"} if have else {}
+    with requests.get(url, headers=headers, stream=True, timeout=300) as resp:
+        resp.raise_for_status()
+        if resp.status_code == 206:
+            mode = "ab"
+        elif resp.status_code == 200:
+            mode = "wb"  # server ignored the range: restart from scratch
+        else:
+            raise RuntimeError(f"repo download rejected: {resp.status_code}")
+        with open(dest, mode) as fh:
+            for chunk in resp.iter_content(chunk_size=1 << 20):
+                fh.write(chunk)
+    return str(dest)
+
+
 def upload_result_file(task_id, path):
     """Upload a burned segment file as the task result (multipart)."""
     with open(path, "rb") as fh:
